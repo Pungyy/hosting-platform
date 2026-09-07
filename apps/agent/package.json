@@ -1,0 +1,26 @@
+{
+  "name": "@hosting/agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "enroll": "tsx src/enroll.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.1.1",
+    "dockerode": "^5.0.1",
+    "dotenv": "^17.4.2",
+    "hono": "4.13.7",
+    "systeminformation": "^5.33.8",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@types/dockerode": "^4.0.1",
+    "@types/node": "26.4.1",
+    "tsx": "4.23.13",
+    "typescript": "7.0.2"
+  }
+}

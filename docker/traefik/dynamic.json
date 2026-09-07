@@ -1,0 +1,72 @@
+{
+  "http": {
+    "routers": {
+      "demo-panel": {
+        "rule": "Host(`demo-panel.localhost`)",
+        "entryPoints": [
+          "web"
+        ],
+        "service": "demo-panel"
+      },
+      "test-site": {
+        "rule": "Host(`test-site.localhost`)",
+        "entryPoints": [
+          "web"
+        ],
+        "service": "test-site"
+      },
+      "second-site": {
+        "rule": "Host(`second-site.localhost`)",
+        "entryPoints": [
+          "web"
+        ],
+        "service": "second-site"
+      },
+      "docker-test--test2-localhost": {
+        "rule": "Host(`test2.localhost`)",
+        "entryPoints": [
+          "web"
+        ],
+        "service": "docker-test"
+      }
+    },
+    "services": {
+      "demo-panel": {
+        "loadBalancer": {
+          "servers": [
+            {
+              "url": "http://hosting-site-demo-panel:8080"
+            }
+          ]
+        }
+      },
+      "test-site": {
+        "loadBalancer": {
+          "servers": [
+            {
+              "url": "http://hosting-site-test-site:8080"
+            }
+          ]
+        }
+      },
+      "second-site": {
+        "loadBalancer": {
+          "servers": [
+            {
+              "url": "http://hosting-site-second-site:8080"
+            }
+          ]
+        }
+      },
+      "docker-test": {
+        "loadBalancer": {
+          "servers": [
+            {
+              "url": "http://hosting-site-docker-test:8080"
+            }
+          ]
+        }
+      }
+    }
+  }
+}
