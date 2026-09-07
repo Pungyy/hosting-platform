@@ -1,6 +1,7 @@
 import type { Context, Next } from "hono"
 
 import { config } from "../config.js"
+import { getAgentToken } from "../services/credentials.js"
 
 export async function requireAgentToken(
   c: Context,
@@ -13,8 +14,7 @@ export async function requireAgentToken(
     return c.json(
       {
         status: "error",
-        message:
-          "Authentification requise",
+        message: "Authentification requise",
       },
       401,
     )
@@ -38,10 +38,27 @@ export async function requireAgentToken(
   }
 
   /*
-   * Authentification locale actuelle.
+   * Le token permanent généré lors de
+   * l'enrôlement est prioritaire.
+   */
+  const permanentToken =
+    getAgentToken()
+
+  if (
+    permanentToken &&
+    token === permanentToken
+  ) {
+    await next()
+    return
+  }
+
+  /*
+   * Fallback pour notre environnement
+   * de développement local.
    *
-   * Ce token sera conservé pour notre
-   * environnement de développement local.
+   * Il permet de continuer à utiliser
+   * AGENT_TOKEN tant que l'Agent n'est
+   * pas encore enrôlé.
    */
   if (
     token === config.agentToken
