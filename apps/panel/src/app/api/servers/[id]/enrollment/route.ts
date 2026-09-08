@@ -3,6 +3,8 @@ import { NextResponse } from "next/server"
 
 import { query } from "@/lib/database"
 
+import { getCurrentSession } from "@/lib/auth/session"
+
 type RouteContext = {
   params: Promise<{
     id: string
@@ -14,6 +16,32 @@ export async function POST(
   context: RouteContext,
 ) {
   try {
+
+const session = await getCurrentSession()
+
+if (!session) {
+  return NextResponse.json(
+    {
+      status: "error",
+      message: "Authentification requise.",
+    },
+    {
+      status: 401,
+    },
+  )
+}
+
+if (session.role !== "admin") {
+  return NextResponse.json(
+    {
+      status: "error",
+      message: "Accès réservé aux administrateurs.",
+    },
+    {
+      status: 403,
+    },
+  )
+}
     const { id } = await context.params
 
     /*

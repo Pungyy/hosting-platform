@@ -3,6 +3,7 @@ import { NextResponse } from "next/server"
 import { z } from "zod"
 
 import { query } from "@/lib/database"
+import { encryptAgentToken } from "@/lib/agent/crypto"
 
 const enrollSchema = z.object({
   token: z
@@ -27,6 +28,12 @@ const enrollSchema = z.object({
     .trim()
     .max(50)
     .optional(),
+
+  agentUrl: z
+    .string()
+    .trim()
+    .url("L'URL de l'Agent est invalide.")
+    .max(500),
 })
 
 export async function POST(
@@ -60,6 +67,7 @@ export async function POST(
       token,
       hostname,
       agentVersion,
+      agentUrl,
     } = parsed.data
 
     /*
@@ -149,21 +157,35 @@ export async function POST(
      *
      * Le token brut sera envoyé une seule fois
      * à l'Agent.
-     *
-     * Seul son hash sera stocké en BDD.
      */
     const agentToken =
       randomBytes(32).toString("hex")
 
+    /*
+     * Hash utilisé pour vérifier les tokens
+     * présentés par l'Agent.
+     */
     const agentTokenHash =
       createHash("sha256")
         .update(agentToken)
         .digest("hex")
 
     /*
+     * Version chiffrée utilisée par le Panel
+     * lorsqu'il doit communiquer avec l'Agent.
+     *
+     * Le token en clair n'est jamais stocké
+     * en BDD.
+     */
+    const agentTokenEncrypted =
+      encryptAgentToken(agentToken)
+
+    /*
      * Marque le serveur comme enrôlé,
-     * remplace son hostname et stocke
-     * le hash du token permanent.
+     * enregistre l'URL de l'Agent et stocke :
+     *
+     * - le hash du token pour l'authentification
+     * - le token chiffré pour les communications
      *
      * Le token d'enrôlement est immédiatement
      * invalidé après utilisation.
@@ -183,16 +205,18 @@ export async function POST(
           UPDATE servers
           SET
             hostname = $1,
+            agent_url = $2,
             status = 'online',
             agent_version =
-              COALESCE($2, agent_version),
+              COALESCE($3, agent_version),
             enrolled_at = NOW(),
             last_seen_at = NOW(),
             enrollment_token_hash = NULL,
             enrollment_token_expires_at = NULL,
-            agent_token_hash = $4,
+            agent_token_hash = $5,
+            agent_token_encrypted = $6,
             updated_at = NOW()
-          WHERE id = $3
+          WHERE id = $4
           RETURNING
             id,
             name,
@@ -204,9 +228,11 @@ export async function POST(
         `,
         [
           hostname,
+          agentUrl,
           agentVersion ?? null,
           server.id,
           agentTokenHash,
+          agentTokenEncrypted,
         ],
       )
 
@@ -229,7 +255,7 @@ export async function POST(
       updateResult.rows[0]
 
     /*
-     * Le token permanent est retourné
+     * Le token permanent en clair est retourné
      * uniquement lors de l'enrôlement.
      */
     return NextResponse.json({

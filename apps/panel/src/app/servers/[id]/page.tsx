@@ -1,20 +1,25 @@
 "use client"
 
 import {
-  ArrowLeft,
-  Cpu,
-  HardDrive,
-  MemoryStick,
-  Server,
   Activity,
+  ArrowLeft,
   Clock,
+  Cpu,
   Globe,
+  HardDrive,
+  KeyRound,
+  MemoryStick,
   RefreshCw,
+  Server,
   ShieldCheck,
 } from "lucide-react"
 import Link from "next/link"
 import { useParams } from "next/navigation"
-import { useCallback, useEffect, useState } from "react"
+import {
+  useCallback,
+  useEffect,
+  useState,
+} from "react"
 
 type ServerMetrics = {
   cpuUsage: number | null
@@ -45,7 +50,14 @@ function formatBytes(bytes: number | null) {
     return "—"
   }
 
-  const units = ["B", "KB", "MB", "GB", "TB"]
+  const units = [
+    "B",
+    "KB",
+    "MB",
+    "GB",
+    "TB",
+  ]
+
   const index = Math.floor(
     Math.log(bytes) / Math.log(1024),
   )
@@ -56,7 +68,9 @@ function formatBytes(bytes: number | null) {
   return `${value.toFixed(2)} ${units[index]}`
 }
 
-function formatUptime(seconds: number | null) {
+function formatUptime(
+  seconds: number | null,
+) {
   if (seconds === null) {
     return "—"
   }
@@ -84,7 +98,9 @@ function formatUptime(seconds: number | null) {
   return `${minutes} min`
 }
 
-function formatLastSeen(date: string | null) {
+function formatLastSeen(
+  date: string | null,
+) {
   if (!date) {
     return "Jamais"
   }
@@ -120,7 +136,9 @@ function formatLastSeen(date: string | null) {
   return `Il y a ${hours}h`
 }
 
-function getUsageClass(value: number | null) {
+function getUsageClass(
+  value: number | null,
+) {
   if (value === null) {
     return "text-slate-400"
   }
@@ -136,7 +154,9 @@ function getUsageClass(value: number | null) {
   return "text-emerald-400"
 }
 
-function getProgressClass(value: number | null) {
+function getProgressClass(
+  value: number | null,
+) {
   if (value === null) {
     return "bg-slate-700"
   }
@@ -193,7 +213,10 @@ function MetricCard({
           className={`h-full rounded-full transition-all ${getProgressClass(value)}`}
           style={{
             width: `${Math.min(
-              Math.max(value ?? 0, 0),
+              Math.max(
+                value ?? 0,
+                0,
+              ),
               100,
             )}%`,
           }}
@@ -243,6 +266,21 @@ export default function ServerDetailPage() {
   const [refreshing, setRefreshing] =
     useState(false)
 
+  const [
+    generatingEnrollment,
+    setGeneratingEnrollment,
+  ] = useState(false)
+
+  const [
+    enrollmentToken,
+    setEnrollmentToken,
+  ] = useState<string | null>(null)
+
+  const [
+    enrollmentError,
+    setEnrollmentError,
+  ] = useState<string | null>(null)
+
   const loadServer = useCallback(
     async (manual = false) => {
       try {
@@ -250,14 +288,16 @@ export default function ServerDetailPage() {
           setRefreshing(true)
         }
 
-        const response = await fetch(
-          `/api/servers/${id}`,
-          {
-            cache: "no-store",
-          },
-        )
+        const response =
+          await fetch(
+            `/api/servers/${id}`,
+            {
+              cache: "no-store",
+            },
+          )
 
-        const data = await response.json()
+        const data =
+          await response.json()
 
         if (!response.ok) {
           throw new Error(
@@ -287,15 +327,68 @@ export default function ServerDetailPage() {
   useEffect(() => {
     loadServer()
 
-    const interval = setInterval(
-      () => {
-        loadServer()
-      },
-      10_000,
-    )
+    const interval =
+      setInterval(
+        () => {
+          loadServer()
+        },
+        10_000,
+      )
 
-    return () => clearInterval(interval)
+    return () =>
+      clearInterval(interval)
   }, [loadServer])
+
+  const generateEnrollmentToken =
+    async () => {
+      try {
+        setGeneratingEnrollment(true)
+        setEnrollmentError(null)
+        setEnrollmentToken(null)
+
+        const response =
+          await fetch(
+            `/api/servers/${id}/enrollment`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type":
+                  "application/json",
+              },
+            },
+          )
+
+        const data =
+          await response.json()
+
+        if (!response.ok) {
+          throw new Error(
+            data.message ||
+              "Impossible de générer le token d'enrôlement.",
+          )
+        }
+
+        const token = data.enrollment?.token
+
+        if (!token) {
+          throw new Error(
+            "Le serveur n'a pas retourné de token.",
+          )
+        }
+
+        setEnrollmentToken(token)
+      } catch (err) {
+        console.error(err)
+
+        setEnrollmentError(
+          err instanceof Error
+            ? err.message
+            : "Une erreur est survenue.",
+        )
+      } finally {
+        setGeneratingEnrollment(false)
+      }
+    }
 
   if (loading) {
     return (
@@ -304,12 +397,14 @@ export default function ServerDetailPage() {
           <div className="h-8 w-64 animate-pulse rounded bg-slate-800" />
 
           <div className="mt-8 grid gap-5 md:grid-cols-3">
-            {[1, 2, 3].map((item) => (
-              <div
-                key={item}
-                className="h-36 animate-pulse rounded-2xl bg-slate-900"
-              />
-            ))}
+            {[1, 2, 3].map(
+              (item) => (
+                <div
+                  key={item}
+                  className="h-36 animate-pulse rounded-2xl bg-slate-900"
+                />
+              ),
+            )}
           </div>
         </div>
       </div>
@@ -410,24 +505,105 @@ export default function ServerDetailPage() {
               </div>
             </div>
 
-            <button
-              type="button"
-              onClick={() => loadServer(true)}
-              disabled={refreshing}
-              className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-900 px-4 py-2.5 text-sm font-medium text-slate-200 transition hover:bg-slate-800 disabled:opacity-50"
-            >
-              <RefreshCw
-                size={16}
-                className={
-                  refreshing
-                    ? "animate-spin"
-                    : ""
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={
+                  generateEnrollmentToken
                 }
-              />
-              Actualiser
-            </button>
+                disabled={
+                  generatingEnrollment
+                }
+                className="inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-500 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <KeyRound
+                  size={16}
+                  className={
+                    generatingEnrollment
+                      ? "animate-pulse"
+                      : ""
+                  }
+                />
+
+                {generatingEnrollment
+                  ? "Génération..."
+                  : "Générer un token"}
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  loadServer(true)
+                }
+                disabled={refreshing}
+                className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-900 px-4 py-2.5 text-sm font-medium text-slate-200 transition hover:bg-slate-800 disabled:opacity-50"
+              >
+                <RefreshCw
+                  size={16}
+                  className={
+                    refreshing
+                      ? "animate-spin"
+                      : ""
+                  }
+                />
+
+                Actualiser
+              </button>
+            </div>
           </div>
         </div>
+
+        {/* Enrollment */}
+        {enrollmentError && (
+          <div className="mb-6 rounded-2xl border border-red-900/50 bg-red-950/20 p-4">
+            <p className="text-sm text-red-400">
+              {enrollmentError}
+            </p>
+          </div>
+        )}
+
+        {enrollmentToken && (
+          <section className="mb-8 rounded-2xl border border-indigo-500/30 bg-indigo-500/5 p-6">
+            <div className="flex items-start gap-4">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-indigo-500/10">
+                <KeyRound
+                  size={18}
+                  className="text-indigo-400"
+                />
+              </div>
+
+              <div className="min-w-0 flex-1">
+                <h2 className="font-semibold text-white">
+                  Token d'enrôlement généré
+                </h2>
+
+                <p className="mt-1 text-xs text-slate-500">
+                  Ce token est temporaire et
+                  doit être utilisé depuis
+                  l'Agent du VPS.
+                </p>
+
+                <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950 p-4">
+                  <p className="mb-2 text-xs font-medium text-slate-500">
+                    Token
+                  </p>
+
+                  <code className="block break-all text-sm text-indigo-300">
+                    {enrollmentToken}
+                  </code>
+                </div>
+
+                <div className="mt-4 rounded-xl border border-amber-500/20 bg-amber-500/5 p-4">
+                  <p className="text-xs text-amber-400">
+                    ⚠️ Ne partage pas ce token.
+                    Il est destiné uniquement à
+                    l'enrôlement de cet Agent.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </section>
+        )}
 
         {/* Metrics */}
         <section>
@@ -447,9 +623,7 @@ export default function ServerDetailPage() {
               title="CPU"
               value={cpuUsage}
               icon={Cpu}
-              subtitle={
-                "Utilisation actuelle du processeur"
-              }
+              subtitle="Utilisation actuelle du processeur"
             />
 
             <MetricCard
@@ -692,7 +866,7 @@ export default function ServerDetailPage() {
           </div>
         </div>
 
-        {/* Docker placeholder */}
+        {/* Docker */}
         <section className="mt-8 rounded-2xl border border-slate-800 bg-slate-900/60 p-6">
           <div className="flex flex-col justify-between gap-4 md:flex-row md:items-center">
             <div className="flex items-center gap-3">

@@ -8,6 +8,9 @@ const panelUrl =
   process.env.PANEL_URL ??
   "http://localhost:3001"
 
+const agentUrl =
+  process.env.AGENT_URL
+
 const enrollmentToken =
   process.env.ENROLLMENT_TOKEN
 
@@ -25,12 +28,22 @@ async function main() {
     )
   }
 
+  if (!agentUrl) {
+    throw new Error(
+      "AGENT_URL est obligatoire.",
+    )
+  }
+
   console.log(
     "Enrôlement de l'Agent...",
   )
 
   console.log(
     `Panel : ${panelUrl}`,
+  )
+
+  console.log(
+    `Agent : ${agentUrl}`,
   )
 
   console.log(
@@ -43,9 +56,11 @@ async function main() {
       enrollmentToken,
       hostname,
       agentVersion,
+      agentUrl,
     )
 
   console.log("")
+
   console.log(
     "✅ Agent enrôlé avec succès.",
   )
@@ -67,6 +82,7 @@ async function main() {
   )
 
   console.log("")
+
   console.log(
     "🔐 Le token permanent a été sauvegardé localement.",
   )
@@ -74,6 +90,7 @@ async function main() {
 
 main().catch((error) => {
   console.error("")
+
   console.error(
     "❌ Échec de l'enrôlement.",
   )

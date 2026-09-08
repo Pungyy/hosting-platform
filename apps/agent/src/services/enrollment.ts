@@ -21,6 +21,7 @@ export async function enrollAgent(
   enrollmentToken: string,
   hostname: string,
   agentVersion: string,
+  agentUrl: string,
 ) {
   const response = await fetch(
     `${panelUrl}/api/servers/enroll`,
@@ -36,6 +37,7 @@ export async function enrollAgent(
         token: enrollmentToken,
         hostname,
         agentVersion,
+        agentUrl,
       }),
     },
   )
