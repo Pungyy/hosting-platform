@@ -15,7 +15,7 @@ const DEPLOYMENT_ROOT =
   process.env.DEPLOYMENT_ROOT ??
   path.resolve(
     process.cwd(),
-    ".tmp/deployments",
+    "../../.tmp/deployments",
   )
 
 const IMAGE_PREFIX = "hosting"
