@@ -1,20 +1,25 @@
 import type { Metadata } from "next"
-import { Geist, Geist_Mono } from "next/font/google"
+import { Inter, JetBrains_Mono } from "next/font/google"
 import "./globals.css"
 import { TooltipProvider } from "@/components/ui/tooltip"
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+const inter = Inter({
+  variable: "--font-inter",
   subsets: ["latin"],
+  display: "swap",
 })
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
+const jetBrainsMono = JetBrains_Mono({
+  variable: "--font-jetbrains-mono",
   subsets: ["latin"],
+  display: "swap",
 })
 
 export const metadata: Metadata = {
-  title: "Hosting Platform",
+  title: {
+    default: "Hosting Platform",
+    template: "%s · Hosting Platform",
+  },
   description: "Gestionnaire d'infrastructure et d'hébergement",
 }
 
@@ -24,8 +29,10 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html lang="fr">
-      <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
+    <html lang="fr" suppressHydrationWarning>
+      <body
+        className={`${inter.variable} ${jetBrainsMono.variable} min-h-screen bg-background font-sans text-foreground antialiased`}
+      >
         <TooltipProvider>{children}</TooltipProvider>
       </body>
     </html>
