@@ -13,7 +13,10 @@ const docker = new Docker()
 
 const DEPLOYMENT_ROOT =
   process.env.DEPLOYMENT_ROOT ??
-  "E:/Dev/hosting-platform/.tmp/deployments"
+  path.resolve(
+    process.cwd(),
+    "../../.tmp/deployments",
+  )
 
 const IMAGE_PREFIX = "hosting"
 
