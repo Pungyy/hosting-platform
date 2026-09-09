@@ -242,6 +242,7 @@ export async function createSite({
         ],
 
         CapDrop: ["ALL"],
+        CapAdd: ["CHOWN"],
 
         AutoRemove: false,
 
@@ -488,6 +489,7 @@ export async function createDeploymentContainer({
         ],
 
         CapDrop: ["ALL"],
+        CapAdd: ["CHOWN"],
 
         AutoRemove: false,
 
@@ -889,3 +891,4 @@ export async function deleteSite(
     deleted: true,
   }
 }
+
