@@ -54,7 +54,6 @@ function createEmptyConfig(): TraefikConfig {
     http: {
       routers: {},
       services: {},
-      middlewares: {},
     },
   }
 }
@@ -89,7 +88,7 @@ async function readConfig(): Promise<TraefikConfig> {
         parsed.http?.services ?? {},
 
       middlewares:
-        parsed.http?.middlewares ?? {},
+        parsed.http?.middlewares,
     },
   }
 }
