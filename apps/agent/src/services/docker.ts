@@ -9,7 +9,16 @@ import {
 const docker = new Docker()
 
 const SITE_PREFIX = "hosting-site-"
-const SITE_IMAGE = "nginxinc/nginx-unprivileged:alpine"
+const SITE_IMAGE =
+  "nginxinc/nginx-unprivileged:alpine"
+
+const DOCKER_LOG_CONFIG = {
+  Type: "json-file",
+  Config: {
+    "max-size": "10m",
+    "max-file": "3",
+  },
+}
 
 export type CreateSiteInput = {
   name: string
@@ -37,11 +46,15 @@ function getDeploymentContainerName(
 
 function validateSiteName(name: string) {
   if (
-    !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name) ||
+    !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(
+      name,
+    ) ||
     name.length < 3 ||
     name.length > 40
   ) {
-    throw new Error("Nom de site invalide.")
+    throw new Error(
+      "Nom de site invalide.",
+    )
   }
 }
 
@@ -129,6 +142,10 @@ export async function getDockerContainers() {
 /*
  * Récupère le statut de tous les sites
  * gérés par notre plateforme.
+ *
+ * On utilise les labels Hosting Platform
+ * plutôt que de considérer n'importe quel
+ * container Docker comme un site.
  */
 export async function getManagedSiteStatuses() {
   const containers =
@@ -202,6 +219,7 @@ export async function createSite({
   const container =
     await docker.createContainer({
       name: containerName,
+
       Image: SITE_IMAGE,
 
       HostConfig: {
@@ -226,6 +244,9 @@ export async function createSite({
         CapDrop: ["ALL"],
 
         AutoRemove: false,
+
+        LogConfig:
+          DOCKER_LOG_CONFIG,
       },
 
       NetworkingConfig: {
@@ -304,12 +325,17 @@ export async function createSite({
 
   return {
     id: inspect.Id,
+
     name,
+
     containerName,
+
     image: SITE_IMAGE,
+
     state:
       inspect.State?.Status ??
       "unknown",
+
     running:
       inspect.State?.Running ??
       false,
@@ -435,6 +461,7 @@ export async function createDeploymentContainer({
   const newContainer =
     await docker.createContainer({
       name: temporaryContainerName,
+
       Image: imageName,
 
       ExposedPorts: {
@@ -463,6 +490,9 @@ export async function createDeploymentContainer({
         CapDrop: ["ALL"],
 
         AutoRemove: false,
+
+        LogConfig:
+          DOCKER_LOG_CONFIG,
       },
 
       NetworkingConfig: {
