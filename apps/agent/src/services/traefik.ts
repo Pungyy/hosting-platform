@@ -5,7 +5,7 @@ const TRAEFIK_CONFIG_PATH =
   process.env.TRAEFIK_CONFIG_PATH ??
   path.resolve(
     process.cwd(),
-    "docker/traefik/dynamic.json",
+    "../../docker/traefik/dynamic.json",
   )
 
 export type TraefikRouter = {
