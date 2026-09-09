@@ -3,7 +3,10 @@ import path from "node:path"
 
 const TRAEFIK_CONFIG_PATH =
   process.env.TRAEFIK_CONFIG_PATH ??
-  "E:/Dev/hosting-platform/docker/traefik/dynamic.json"
+  path.resolve(
+    process.cwd(),
+    "docker/traefik/dynamic.json",
+  )
 
 export type TraefikRouter = {
   rule: string
