@@ -1,9 +1,10 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import {
   Box,
   Calendar,
+  Check,
   CheckCircle2,
   Clock,
   Container,
@@ -50,6 +51,8 @@ type Site = {
   server_id: string
   server_name: string | null
   server_hostname: string | null
+  repository_url: string | null
+  repository_branch: string | null
 }
 
 type SiteResponse = {
@@ -122,6 +125,13 @@ export default function SitePage({
   )
   const [siteId, setSiteId] = useState<string | null>(null)
 
+  const [repoUrl, setRepoUrl] = useState("")
+  const [repoBranch, setRepoBranch] = useState("")
+  const [savingRepo, setSavingRepo] = useState(false)
+  const [repoError, setRepoError] = useState<string | null>(null)
+  const [repoSaved, setRepoSaved] = useState(false)
+  const repoInitialized = useRef(false)
+
   const loadSite = async () => {
     try {
       const { id } = await params
@@ -136,6 +146,16 @@ export default function SitePage({
 
       setSite(data.site ?? null)
       setError(null)
+
+      /*
+       * On initialise le formulaire GitHub une seule fois,
+       * pour ne pas écraser une saisie en cours lors du polling.
+       */
+      if (data.site && !repoInitialized.current) {
+        setRepoUrl(data.site.repository_url ?? "")
+        setRepoBranch(data.site.repository_branch ?? "main")
+        repoInitialized.current = true
+      }
     } catch (error) {
       console.error("Erreur lors du chargement du site :", error)
       setError(
@@ -143,6 +163,47 @@ export default function SitePage({
       )
     } finally {
       setLoading(false)
+    }
+  }
+
+  const saveRepositoryConfig = async () => {
+    if (!siteId || savingRepo) {
+      return
+    }
+
+    setSavingRepo(true)
+    setRepoError(null)
+    setRepoSaved(false)
+
+    try {
+      const response = await fetch(`/api/sites/${siteId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          repositoryUrl: repoUrl.trim(),
+          repositoryBranch: repoBranch.trim() || "main",
+        }),
+      })
+
+      const data = await response.json()
+
+      if (!response.ok || data.status !== "ok") {
+        throw new Error(
+          data.message ?? "Impossible d'enregistrer la configuration."
+        )
+      }
+
+      setRepoSaved(true)
+      await loadSite()
+    } catch (error) {
+      console.error("Erreur lors de l'enregistrement du repository :", error)
+      setRepoError(
+        error instanceof Error
+          ? error.message
+          : "Impossible d'enregistrer la configuration."
+      )
+    } finally {
+      setSavingRepo(false)
     }
   }
 
@@ -526,6 +587,8 @@ export default function SitePage({
   const statusTone: Tone = isDeploying ? "warning" : resolved.tone
   const statusLabel = isDeploying ? "Déploiement…" : resolved.label
 
+  const hasRepository = Boolean(site.repository_url)
+
   return (
     <div className="space-y-8">
       <PageHeader
@@ -545,7 +608,12 @@ export default function SitePage({
           <>
             <Button
               onClick={executeDeploy}
-              disabled={deploying || deleteLoading}
+              disabled={deploying || deleteLoading || !hasRepository}
+              title={
+                hasRepository
+                  ? undefined
+                  : "Configurez d'abord un repository GitHub"
+              }
             >
               {deploying ? <Spinner className="text-current" /> : <Rocket />}
               {deploying ? "Déploiement…" : "Déployer"}
@@ -575,6 +643,97 @@ export default function SitePage({
         />
         <InfoCard icon={<Calendar />} label="Créé le" value={createdAt} />
       </div>
+
+      {/* CONFIGURATION GITHUB */}
+      <Card>
+        <CardHeader className="flex-row items-start justify-between gap-4 space-y-0">
+          <div className="space-y-1.5">
+            <CardTitle>Configuration GitHub</CardTitle>
+            <CardDescription>
+              Repository et branche utilisés lors du déploiement.
+            </CardDescription>
+          </div>
+
+          {hasRepository ? (
+            <StatusPill tone="success">Configuré</StatusPill>
+          ) : (
+            <StatusPill tone="warning">Non configuré</StatusPill>
+          )}
+        </CardHeader>
+
+        <CardContent className="space-y-4">
+          {!hasRepository && (
+            <div className="rounded-lg border border-warning/25 bg-warning/5 px-4 py-3 text-sm text-muted-foreground">
+              Renseignez un repository GitHub public pour activer le bouton
+              « Déployer ».
+            </div>
+          )}
+
+          <div className="grid gap-4 sm:grid-cols-[1fr_200px]">
+            <div className="space-y-2">
+              <label
+                htmlFor="repo-url"
+                className="text-sm font-medium"
+              >
+                URL du repository
+              </label>
+              <Input
+                id="repo-url"
+                value={repoUrl}
+                onChange={(event) => {
+                  setRepoUrl(event.target.value)
+                  setRepoSaved(false)
+                }}
+                placeholder="https://github.com/utilisateur/depot"
+                disabled={savingRepo}
+                autoComplete="off"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label
+                htmlFor="repo-branch"
+                className="text-sm font-medium"
+              >
+                Branche
+              </label>
+              <Input
+                id="repo-branch"
+                value={repoBranch}
+                onChange={(event) => {
+                  setRepoBranch(event.target.value)
+                  setRepoSaved(false)
+                }}
+                placeholder="main"
+                disabled={savingRepo}
+                autoComplete="off"
+              />
+            </div>
+          </div>
+
+          {repoError && (
+            <p className="text-sm text-danger">{repoError}</p>
+          )}
+
+          <div className="flex items-center gap-3">
+            <Button onClick={saveRepositoryConfig} disabled={savingRepo}>
+              {savingRepo ? (
+                <Spinner className="text-current" />
+              ) : (
+                <GitBranch />
+              )}
+              Enregistrer
+            </Button>
+
+            {repoSaved && (
+              <span className="inline-flex items-center gap-1.5 text-sm text-success">
+                <Check className="size-4" />
+                Enregistré
+              </span>
+            )}
+          </div>
+        </CardContent>
+      </Card>
 
       {/* DOMAINES */}
       <Card>
