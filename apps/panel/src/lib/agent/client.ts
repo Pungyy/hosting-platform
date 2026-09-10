@@ -1,7 +1,7 @@
 import { decryptAgentToken } from "@/lib/agent/crypto"
 import { query } from "@/lib/database"
 
-type AgentResponse<T = unknown> = {
+type AgentResponse = {
   status?: string
   message?: string
   [key: string]: unknown
@@ -41,6 +41,38 @@ async function getAgentConfig(
     !server.agent_url ||
     !server.agent_token_encrypted
   ) {
+    /*
+     * Fallback développement local :
+     *
+     * le serveur n'est pas encore enrôlé, mais les
+     * variables d'environnement de l'Agent local
+     * sont disponibles.
+     *
+     * En production, chaque serveur DOIT être enrôlé
+     * (agent_url + token chiffré stockés en base).
+     */
+    const fallbackUrl =
+      process.env.AGENT_URL
+
+    const fallbackToken =
+      process.env.AGENT_TOKEN
+
+    if (
+      fallbackUrl &&
+      fallbackToken
+    ) {
+      return {
+        agentUrl:
+          fallbackUrl.replace(
+            /\/+$/,
+            "",
+          ),
+
+        agentToken:
+          fallbackToken,
+      }
+    }
+
     throw new Error(
       "La connexion de l'Agent n'est pas configurée pour ce serveur.",
     )
@@ -214,5 +246,71 @@ export async function getAgentTraefikConfig(
   return agentRequest(
     serverId,
     "/traefik/config",
+  )
+}
+
+export async function getAgentDockerInfo(
+  serverId: string,
+) {
+  return agentRequest<{
+    status: string
+    docker: {
+      version: string
+      containers: {
+        total: number
+        running: number
+      }
+    }
+  }>(
+    serverId,
+    "/docker",
+  )
+}
+
+export async function getAgentSiteLogs(
+  serverId: string,
+  siteName: string,
+) {
+  return agentRequest<{
+    status: string
+    site: {
+      name: string
+      containerId: string
+      logs: string
+    }
+  }>(
+    serverId,
+    `/sites/${encodeURIComponent(siteName)}/logs`,
+  )
+}
+
+export async function deleteAgentSite(
+  serverId: string,
+  siteName: string,
+) {
+  return agentRequest(
+    serverId,
+    `/sites/${encodeURIComponent(siteName)}`,
+    {
+      method: "DELETE",
+    },
+  )
+}
+
+export async function deployAgentSite(
+  serverId: string,
+  data: {
+    siteName: string
+    repositoryUrl: string
+    branch: string
+  },
+) {
+  return agentRequest(
+    serverId,
+    "/deployments/build",
+    {
+      method: "POST",
+      body: JSON.stringify(data),
+    },
   )
 }
