@@ -93,6 +93,28 @@ async function readConfig(): Promise<TraefikConfig> {
   }
 }
 
+/*
+ * Traefik refuse un bloc `middlewares` vide via le HTTP Provider :
+ * « middlewares cannot be a standalone element ».
+ *
+ * On retire donc la clé lorsqu'elle ne contient aucun middleware,
+ * aussi bien à l'écriture qu'à la lecture servie à Traefik.
+ */
+function normalizeConfig(
+  config: TraefikConfig,
+): TraefikConfig {
+  if (
+    config.http.middlewares &&
+    Object.keys(
+      config.http.middlewares,
+    ).length === 0
+  ) {
+    delete config.http.middlewares
+  }
+
+  return config
+}
+
 async function writeConfig(
   config: TraefikConfig,
 ) {
@@ -110,7 +132,7 @@ async function writeConfig(
 
   const content =
     `${JSON.stringify(
-      config,
+      normalizeConfig(config),
       null,
       2,
     )}\n`
@@ -123,7 +145,9 @@ async function writeConfig(
 }
 
 export async function getTraefikConfig() {
-  return readConfig()
+  return normalizeConfig(
+    await readConfig(),
+  )
 }
 
 function createRouterName(
