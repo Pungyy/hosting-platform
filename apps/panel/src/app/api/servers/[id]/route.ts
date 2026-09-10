@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server"
 
+import { requireSession } from "@/lib/auth/guard"
 import { query } from "@/lib/database"
 
 type ServerRow = {
@@ -31,6 +32,9 @@ export async function GET(
   },
 ) {
   try {
+    const { response: authError } = await requireSession()
+    if (authError) return authError
+
     const { id } = await context.params
 
     const result = await query<ServerRow>(

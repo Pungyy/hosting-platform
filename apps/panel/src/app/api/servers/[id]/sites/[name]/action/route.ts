@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server"
-import { getCurrentSession } from "@/lib/auth/session"
+import { requireSession } from "@/lib/auth/guard"
 import { agentSiteAction } from "@/lib/agent/client"
 
 const allowedActions = [
@@ -20,17 +20,8 @@ export async function POST(
   },
 ) {
   try {
-    const session = await getCurrentSession()
-
-    if (!session) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message: "Authentification requise.",
-        },
-        { status: 401 },
-      )
-    }
+    const { response: authError } = await requireSession()
+    if (authError) return authError
 
     const { id, name } = await context.params
 

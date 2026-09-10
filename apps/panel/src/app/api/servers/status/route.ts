@@ -1,9 +1,13 @@
 import { NextResponse } from "next/server"
 
+import { requireSession } from "@/lib/auth/guard"
 import { query } from "@/lib/database"
 
 export async function POST() {
   try {
+    const { response: authError } = await requireSession()
+    if (authError) return authError
+
     const result = await query<{
       id: string
       name: string

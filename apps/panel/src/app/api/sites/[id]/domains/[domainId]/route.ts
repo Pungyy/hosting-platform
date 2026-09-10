@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server"
 
+import { requireSession } from "@/lib/auth/guard"
 import { query } from "@/lib/database"
 
 type RouteContext = {
@@ -173,6 +174,9 @@ export async function PATCH(
   { params }: RouteContext,
 ) {
   try {
+    const { response: authError } = await requireSession()
+    if (authError) return authError
+
     const {
       id,
       domainId,
@@ -547,6 +551,9 @@ export async function DELETE(
   { params }: RouteContext,
 ) {
   try {
+    const { response: authError } = await requireSession()
+    if (authError) return authError
+
     const {
       id,
       domainId,

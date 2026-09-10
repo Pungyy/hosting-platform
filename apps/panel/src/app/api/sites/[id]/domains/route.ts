@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server"
 
+import { requireSession } from "@/lib/auth/guard"
 import { query } from "@/lib/database"
 
 type RouteContext = {
@@ -147,6 +148,9 @@ export async function GET(
   { params }: RouteContext,
 ) {
   try {
+    const { response: authError } = await requireSession()
+    if (authError) return authError
+
     const { id } =
       await params
 
@@ -223,6 +227,9 @@ export async function POST(
   { params }: RouteContext,
 ) {
   try {
+    const { response: authError } = await requireSession()
+    if (authError) return authError
+
     const { id } =
       await params
 

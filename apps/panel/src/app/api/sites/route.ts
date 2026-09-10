@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server"
 import { z } from "zod"
 
+import { requireSession } from "@/lib/auth/guard"
 import { query } from "@/lib/database"
 
 const createSiteSchema = z.object({
@@ -105,6 +106,9 @@ async function getAgentSiteStatuses() {
  */
 export async function GET() {
   try {
+    const { response: authError } = await requireSession()
+    if (authError) return authError
+
     /*
      * Récupération des sites en base.
      */
@@ -317,6 +321,9 @@ export async function POST(
   request: Request,
 ) {
   try {
+    const { response: authError } = await requireSession()
+    if (authError) return authError
+
     /*
      * Vérification du body JSON.
      */

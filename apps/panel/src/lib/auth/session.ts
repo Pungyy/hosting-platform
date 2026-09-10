@@ -1,12 +1,12 @@
 ﻿import { createHash, randomBytes } from "node:crypto"
 
 import { query } from "@/lib/database"
+import { SESSION_COOKIE_NAME } from "@/lib/auth/cookie"
+
+export { SESSION_COOKIE_NAME }
 
 const SESSION_DURATION_MS =
   7 * 24 * 60 * 60 * 1000
-
-export const SESSION_COOKIE_NAME =
-  "hosting_session"
 
 function hashSessionToken(
   token: string,

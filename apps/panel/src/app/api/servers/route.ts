@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server"
 import { z } from "zod"
 
+import { requireSession } from "@/lib/auth/guard"
 import { query } from "@/lib/database"
 
 const createServerSchema = z.object({
@@ -32,6 +33,9 @@ const createServerSchema = z.object({
 
 export async function GET() {
   try {
+    const { response: authError } = await requireSession()
+    if (authError) return authError
+
     const result = await query<{
       id: string
       name: string
@@ -200,6 +204,9 @@ export async function POST(
   request: Request,
 ) {
   try {
+    const { response: authError } = await requireSession()
+    if (authError) return authError
+
     const body =
       await request.json()
 

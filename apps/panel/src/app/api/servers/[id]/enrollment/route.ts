@@ -1,9 +1,8 @@
 import { createHash, randomBytes } from "node:crypto"
 import { NextResponse } from "next/server"
 
+import { requireSession } from "@/lib/auth/guard"
 import { query } from "@/lib/database"
-
-import { getCurrentSession } from "@/lib/auth/session"
 
 type RouteContext = {
   params: Promise<{
@@ -12,36 +11,23 @@ type RouteContext = {
 }
 
 export async function POST(
-  request: Request,
+  _request: Request,
   context: RouteContext,
 ) {
   try {
+    const { session, response: authError } = await requireSession()
+    if (authError) return authError
 
-const session = await getCurrentSession()
+    if (session.role !== "admin") {
+      return NextResponse.json(
+        {
+          status: "error",
+          message: "Accès réservé aux administrateurs.",
+        },
+        { status: 403 },
+      )
+    }
 
-if (!session) {
-  return NextResponse.json(
-    {
-      status: "error",
-      message: "Authentification requise.",
-    },
-    {
-      status: 401,
-    },
-  )
-}
-
-if (session.role !== "admin") {
-  return NextResponse.json(
-    {
-      status: "error",
-      message: "Accès réservé aux administrateurs.",
-    },
-    {
-      status: 403,
-    },
-  )
-}
     const { id } = await context.params
 
     /*

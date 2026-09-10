@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server"
 
 import { deployAgentSite } from "@/lib/agent/client"
-import { getCurrentSession } from "@/lib/auth/session"
+import { requireSession } from "@/lib/auth/guard"
 import { query } from "@/lib/database"
 
 type RouteContext = {
@@ -46,19 +46,8 @@ export async function POST(
   let deploymentId: string | null = null
 
   try {
-    const session = await getCurrentSession()
-
-    if (!session) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message: "Authentification requise.",
-        },
-        {
-          status: 401,
-        },
-      )
-    }
+    const { response: authError } = await requireSession()
+    if (authError) return authError
 
     const { id } = await params
 
