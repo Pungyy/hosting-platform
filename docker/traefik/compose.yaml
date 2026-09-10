@@ -1,0 +1,52 @@
+# Reverse proxy Traefik — environnement de développement local.
+#
+# La configuration dynamique (routers / services par site) n'est PAS ici :
+# elle est servie par l'Agent via son HTTP Provider, que Traefik interroge sur
+#   http://host.docker.internal:4000/traefik/config
+#
+# Prérequis : le réseau Docker `hosting-proxy` doit exister. Il est créé par
+# l'Agent à son premier démarrage ; sinon :
+#   docker network create hosting-proxy && docker network create hosting-sites
+#
+# Démarrage :
+#   cp .env.example .env      # puis renseigner AGENT_TOKEN (= apps/agent/.env)
+#   docker compose up -d
+
+services:
+  traefik:
+    image: traefik:v3.5
+    container_name: hosting-traefik
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    command:
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--providers.http.endpoint=http://host.docker.internal:4000/traefik/config"
+      - "--providers.http.pollInterval=2s"
+      - "--providers.http.headers.Authorization=Bearer ${AGENT_TOKEN:?AGENT_TOKEN manquant — copiez .env.example vers .env}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
+    extra_hosts:
+      # Permet à Traefik de joindre l'Agent sur l'hôte (Docker Desktop le
+      # fournit déjà ; `host-gateway` le rend explicite pour Linux / VPS).
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - hosting-traefik-acme:/letsencrypt
+    networks:
+      - hosting-proxy
+
+networks:
+  hosting-proxy:
+    name: hosting-proxy
+    external: true
+
+volumes:
+  # external : `docker compose down -v` ne doit jamais supprimer les
+  # certificats Let's Encrypt (rate-limité). À créer une fois :
+  #   docker volume create hosting-traefik-acme
+  hosting-traefik-acme:
+    name: hosting-traefik-acme
+    external: true

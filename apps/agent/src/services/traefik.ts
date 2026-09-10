@@ -59,11 +59,28 @@ function createEmptyConfig(): TraefikConfig {
 }
 
 async function readConfig(): Promise<TraefikConfig> {
-  const content =
-    await fs.readFile(
-      TRAEFIK_CONFIG_PATH,
-      "utf8",
-    )
+  let content: string
+
+  try {
+    content =
+      await fs.readFile(
+        TRAEFIK_CONFIG_PATH,
+        "utf8",
+      )
+  } catch (error) {
+    /*
+     * Aucun fichier encore : installation neuve, aucun domaine
+     * n'a \u00E9t\u00E9 synchronis\u00E9. On sert une configuration vide.
+     * `writeConfig` recr\u00E9era le fichier (mkdir r\u00E9cursif inclus).
+     */
+    if (
+      (error as NodeJS.ErrnoException).code === "ENOENT"
+    ) {
+      return createEmptyConfig()
+    }
+
+    throw error
+  }
 
   const cleanContent =
     content
