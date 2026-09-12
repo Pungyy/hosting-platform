@@ -25,8 +25,15 @@ function getEncryptionKey(): Buffer {
   return Buffer.from(keyHex, "hex")
 }
 
-export function encryptAgentToken(
-  token: string,
+/*
+ * Chiffrement générique aes-256-gcm, utilisé pour tout secret que le
+ * Panel doit pouvoir déchiffrer plus tard (token d'Agent, mot de passe
+ * de base de données…). La clé maître est la même pour tous les secrets
+ * (AGENT_TOKEN_ENCRYPTION_KEY) : on ne chiffre ici que des identifiants
+ * internes à l'infrastructure, pas des secrets utilisateur externes.
+ */
+export function encryptSecret(
+  value: string,
 ): string {
   const key = getEncryptionKey()
   const iv = randomBytes(12)
@@ -39,7 +46,7 @@ export function encryptAgentToken(
     )
 
   const encrypted = Buffer.concat([
-    cipher.update(token, "utf8"),
+    cipher.update(value, "utf8"),
     cipher.final(),
   ])
 
@@ -53,17 +60,17 @@ export function encryptAgentToken(
   ].join(":")
 }
 
-export function decryptAgentToken(
-  encryptedToken: string,
+export function decryptSecret(
+  encryptedValue: string,
 ): string {
   const key = getEncryptionKey()
 
   const parts =
-    encryptedToken.split(":")
+    encryptedValue.split(":")
 
   if (parts.length !== 3) {
     throw new Error(
-      "Token Agent chiffré invalide.",
+      "Secret chiffré invalide.",
     )
   }
 
@@ -94,3 +101,10 @@ export function decryptAgentToken(
 
   return decrypted.toString("utf8")
 }
+
+/*
+ * Alias historiques : le token d'Agent était le premier secret chiffré
+ * par ce module, avant que le mécanisme ne soit généralisé.
+ */
+export const encryptAgentToken = encryptSecret
+export const decryptAgentToken = decryptSecret

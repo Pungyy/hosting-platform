@@ -21,6 +21,15 @@ import {
 
 import { createSiteController } from "./controllers/sites.js"
 
+import {
+  deleteDatabase,
+  executeDatabaseAction,
+  getDatabaseLogs,
+  getManagedDatabaseStatuses,
+} from "./services/database.js"
+
+import { createDatabaseController } from "./controllers/databases.js"
+
 import { requireAgentToken } from "./middleware/auth.js"
 
 import {
@@ -617,6 +626,251 @@ app.delete(
             error instanceof Error
               ? error.message
               : "Impossible de supprimer le site.",
+        },
+        500,
+      )
+    }
+  },
+)
+
+/*
+ * ============================================================
+ * Databases
+ * ============================================================
+ */
+
+/*
+ * Liste des statuts Docker de toutes les bases gérées.
+ */
+
+app.get(
+  "/databases/statuses",
+  requireAgentToken,
+  async (c) => {
+    try {
+      const databases =
+        await getManagedDatabaseStatuses()
+
+      return c.json({
+        status: "ok",
+        databases,
+      })
+    } catch (error) {
+      console.error(
+        "GET /databases/statuses error:",
+        error,
+      )
+
+      return c.json(
+        {
+          status: "error",
+          message:
+            "Impossible de récupérer les statuts des bases de données.",
+        },
+        500,
+      )
+    }
+  },
+)
+
+/*
+ * Création d'une base de données
+ */
+
+app.post(
+  "/databases",
+  requireAgentToken,
+  async (c) => {
+    const result =
+      await createDatabaseController(
+        c.req.raw,
+      )
+
+    if (result.response) {
+      return result.response
+    }
+
+    return c.json(
+      result.data,
+    )
+  },
+)
+
+/*
+ * Actions sur une base de données
+ */
+
+app.post(
+  "/databases/:name/action",
+  requireAgentToken,
+  async (c) => {
+    try {
+      const name =
+        c.req.param("name")
+
+      if (!name) {
+        return c.json(
+          {
+            status: "error",
+            message:
+              "Nom de la base manquant.",
+          },
+          400,
+        )
+      }
+
+      const body =
+        await c.req
+          .json()
+          .catch(() => null)
+
+      const parsed =
+        siteActionSchema.safeParse(
+          body,
+        )
+
+      if (!parsed.success) {
+        return c.json(
+          {
+            status: "error",
+            message:
+              "Action invalide.",
+            errors:
+              parsed.error.flatten(),
+          },
+          400,
+        )
+      }
+
+      const result =
+        await executeDatabaseAction(
+          name,
+          parsed.data.action,
+        )
+
+      return c.json({
+        status: "ok",
+        action:
+          parsed.data.action,
+        database: result,
+      })
+    } catch (error) {
+      console.error(
+        "POST /databases/:name/action error:",
+        error,
+      )
+
+      return c.json(
+        {
+          status: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Impossible d'exécuter l'action.",
+        },
+        500,
+      )
+    }
+  },
+)
+
+/*
+ * Logs d'une base de données
+ */
+
+app.get(
+  "/databases/:name/logs",
+  requireAgentToken,
+  async (c) => {
+    try {
+      const name =
+        c.req.param("name")
+
+      if (!name) {
+        return c.json(
+          {
+            status: "error",
+            message:
+              "Nom de la base manquant.",
+          },
+          400,
+        )
+      }
+
+      const logs =
+        await getDatabaseLogs(
+          name,
+        )
+
+      return c.json({
+        status: "ok",
+        logs,
+      })
+    } catch (error) {
+      console.error(
+        "GET /databases/:name/logs error:",
+        error,
+      )
+
+      return c.json(
+        {
+          status: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Impossible de récupérer les logs.",
+        },
+        500,
+      )
+    }
+  },
+)
+
+/*
+ * Suppression d'une base de données
+ */
+
+app.delete(
+  "/databases/:name",
+  requireAgentToken,
+  async (c) => {
+    try {
+      const name =
+        c.req.param("name")
+
+      if (!name) {
+        return c.json(
+          {
+            status: "error",
+            message:
+              "Nom de la base manquant.",
+          },
+          400,
+        )
+      }
+
+      const result =
+        await deleteDatabase(
+          name,
+        )
+
+      return c.json({
+        status: "ok",
+        database: result,
+      })
+    } catch (error) {
+      console.error(
+        "DELETE /databases/:name error:",
+        error,
+      )
+
+      return c.json(
+        {
+          status: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Impossible de supprimer la base de données.",
         },
         500,
       )

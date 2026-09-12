@@ -58,7 +58,7 @@ function validateSiteName(name: string) {
   }
 }
 
-async function ensureNetwork(
+export async function ensureNetwork(
   networkName: string,
 ) {
   const networks =

@@ -356,3 +356,103 @@ export async function deployAgentSite(
     },
   )
 }
+
+export async function getAgentDatabaseStatuses(
+  serverId: string,
+) {
+  return agentRequest<{
+    status: string
+    databases: Array<{
+      name: string | null
+      containerId: string
+      containerName: string | null
+      status: string
+      running: boolean
+    }>
+  }>(
+    serverId,
+    "/databases/statuses",
+  )
+}
+
+export async function createAgentDatabase(
+  serverId: string,
+  data: {
+    name: string
+    engine: string
+  },
+) {
+  return agentRequest<{
+    status: string
+    database?: {
+      id: string
+      name: string
+      containerName: string
+      image: string
+      engine: string
+      databaseName: string
+      username: string
+      password: string
+      port: number
+      running: boolean
+    }
+  }>(
+    serverId,
+    "/databases",
+    {
+      method: "POST",
+      body: JSON.stringify(data),
+    },
+  )
+}
+
+export async function agentDatabaseAction(
+  serverId: string,
+  databaseName: string,
+  action: string,
+) {
+  return agentRequest<{
+    status: string
+    database?: {
+      name: string
+      containerId: string
+      status: string
+      running: boolean
+    }
+  }>(
+    serverId,
+    `/databases/${encodeURIComponent(databaseName)}/action`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        action,
+      }),
+    },
+  )
+}
+
+export async function getAgentDatabaseLogs(
+  serverId: string,
+  databaseName: string,
+) {
+  return agentRequest<{
+    status: string
+    logs: string
+  }>(
+    serverId,
+    `/databases/${encodeURIComponent(databaseName)}/logs`,
+  )
+}
+
+export async function deleteAgentDatabase(
+  serverId: string,
+  databaseName: string,
+) {
+  return agentRequest(
+    serverId,
+    `/databases/${encodeURIComponent(databaseName)}`,
+    {
+      method: "DELETE",
+    },
+  )
+}
