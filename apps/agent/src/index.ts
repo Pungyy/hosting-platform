@@ -1,3 +1,6 @@
+import { createReadStream } from "node:fs"
+import { Readable } from "node:stream"
+
 import { serve } from "@hono/node-server"
 import { Hono } from "hono"
 import { z } from "zod"
@@ -29,6 +32,12 @@ import {
 } from "./services/database.js"
 
 import { createDatabaseController } from "./controllers/databases.js"
+
+import {
+  createBackup,
+  deleteBackupFile,
+  getBackupFilePath,
+} from "./services/backup.js"
 
 import { requireAgentToken } from "./middleware/auth.js"
 
@@ -871,6 +880,182 @@ app.delete(
             error instanceof Error
               ? error.message
               : "Impossible de supprimer la base de données.",
+        },
+        500,
+      )
+    }
+  },
+)
+
+/*
+ * Sauvegardes d'une base de données
+ */
+
+app.post(
+  "/databases/:name/backups",
+  requireAgentToken,
+  async (c) => {
+    try {
+      const name =
+        c.req.param("name")
+
+      if (!name) {
+        return c.json(
+          {
+            status: "error",
+            message:
+              "Nom de la base manquant.",
+          },
+          400,
+        )
+      }
+
+      const backup =
+        await createBackup(
+          name,
+        )
+
+      return c.json({
+        status: "ok",
+        backup,
+      })
+    } catch (error) {
+      console.error(
+        "POST /databases/:name/backups error:",
+        error,
+      )
+
+      return c.json(
+        {
+          status: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Impossible de créer la sauvegarde.",
+        },
+        500,
+      )
+    }
+  },
+)
+
+app.get(
+  "/databases/:name/backups/:filename",
+  requireAgentToken,
+  async (c) => {
+    try {
+      const name =
+        c.req.param("name")
+      const filename =
+        c.req.param("filename")
+
+      if (!name || !filename) {
+        return c.json(
+          {
+            status: "error",
+            message:
+              "Paramètres manquants.",
+          },
+          400,
+        )
+      }
+
+      const filePath =
+        await getBackupFilePath(
+          name,
+          filename,
+        )
+
+      if (!filePath) {
+        return c.json(
+          {
+            status: "error",
+            message:
+              "Sauvegarde introuvable.",
+          },
+          404,
+        )
+      }
+
+      const stream =
+        Readable.toWeb(
+          createReadStream(
+            filePath,
+          ),
+        ) as ReadableStream
+
+      return c.body(
+        stream,
+        200,
+        {
+          "Content-Type":
+            "application/gzip",
+          "Content-Disposition":
+            `attachment; filename="${filename}"`,
+        },
+      )
+    } catch (error) {
+      console.error(
+        "GET /databases/:name/backups/:filename error:",
+        error,
+      )
+
+      return c.json(
+        {
+          status: "error",
+          message:
+            "Impossible de récupérer la sauvegarde.",
+        },
+        500,
+      )
+    }
+  },
+)
+
+app.delete(
+  "/databases/:name/backups/:filename",
+  requireAgentToken,
+  async (c) => {
+    try {
+      const name =
+        c.req.param("name")
+      const filename =
+        c.req.param("filename")
+
+      if (!name || !filename) {
+        return c.json(
+          {
+            status: "error",
+            message:
+              "Paramètres manquants.",
+          },
+          400,
+        )
+      }
+
+      const result =
+        await deleteBackupFile(
+          name,
+          filename,
+        )
+
+      return c.json({
+        status: "ok",
+        backup: result,
+      })
+    } catch (error) {
+      console.error(
+        "DELETE /databases/:name/backups/:filename error:",
+        error,
+      )
+
+      return c.json(
+        {
+          status: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Impossible de supprimer la sauvegarde.",
         },
         500,
       )

@@ -456,3 +456,105 @@ export async function deleteAgentDatabase(
     },
   )
 }
+
+export async function createAgentDatabaseBackup(
+  serverId: string,
+  databaseName: string,
+) {
+  return agentRequest<{
+    status: string
+    backup?: {
+      filename: string
+      sizeBytes: number
+    }
+  }>(
+    serverId,
+    `/databases/${encodeURIComponent(databaseName)}/backups`,
+    {
+      method: "POST",
+
+      /*
+       * `pg_dump` est synchrone côté Agent, comme le build de
+       * déploiement — peut prendre du temps sur une grosse base.
+       */
+      signal: AbortSignal.timeout(
+        10 * 60 * 1000,
+      ),
+    },
+  )
+}
+
+export async function deleteAgentDatabaseBackup(
+  serverId: string,
+  databaseName: string,
+  filename: string,
+) {
+  return agentRequest(
+    serverId,
+    `/databases/${encodeURIComponent(databaseName)}/backups/${encodeURIComponent(filename)}`,
+    {
+      method: "DELETE",
+    },
+  )
+}
+
+/*
+ * Contrairement à `agentRequest`, ne parse pas la réponse en JSON : un
+ * fichier de sauvegarde est un binaire (.sql.gz), pas un texte JSON.
+ * Retourne la `Response` brute pour que la route Panel puisse relayer
+ * le flux directement au navigateur.
+ */
+export async function downloadAgentDatabaseBackup(
+  serverId: string,
+  databaseName: string,
+  filename: string,
+) {
+  const {
+    agentUrl,
+    agentToken,
+  } =
+    await getAgentConfig(
+      serverId,
+    )
+
+  let response: Response
+
+  try {
+    response =
+      await fetch(
+        `${agentUrl}/databases/${encodeURIComponent(databaseName)}/backups/${encodeURIComponent(filename)}`,
+        {
+          signal: AbortSignal.timeout(
+            DEFAULT_TIMEOUT_MS,
+          ),
+
+          headers: {
+            Authorization:
+              `Bearer ${agentToken}`,
+          },
+
+          cache: "no-store",
+        },
+      )
+  } catch (error) {
+    const name =
+      (error as Error).name
+
+    if (
+      name === "TimeoutError" ||
+      name === "AbortError"
+    ) {
+      throw new Error(
+        "L'Agent n'a pas répondu à temps.",
+      )
+    }
+
+    throw new Error(
+      `Impossible de joindre l'Agent : ${
+        (error as Error).message
+      }`,
+    )
+  }
+
+  return response
+}

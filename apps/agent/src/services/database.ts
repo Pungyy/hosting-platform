@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto"
 import Docker from "dockerode"
 
 import { config } from "../config.js"
+import { deleteAllBackups } from "./backup.js"
 import { ensureNetwork } from "./docker.js"
 
 const docker = new Docker()
@@ -373,6 +374,15 @@ export async function deleteDatabase(name: string) {
   } catch (error) {
     console.error(
       `Impossible de supprimer le volume de ${name}:`,
+      error,
+    )
+  }
+
+  try {
+    await deleteAllBackups(name)
+  } catch (error) {
+    console.error(
+      `Impossible de supprimer les sauvegardes de ${name}:`,
       error,
     )
   }
