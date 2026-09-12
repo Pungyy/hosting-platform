@@ -40,12 +40,7 @@ const navigation: NavSection[] = [
       { href: "/servers", label: "Serveurs", icon: Server },
       { href: "/deployments", label: "Déploiements", icon: Rocket },
       { href: "/databases", label: "Bases de données", icon: Database },
-    ],
-  },
-  {
-    title: "Bientôt",
-    items: [
-      { href: "/backups", label: "Sauvegardes", icon: HardDrive, soon: true },
+      { href: "/backups", label: "Sauvegardes", icon: HardDrive },
     ],
   },
 ]

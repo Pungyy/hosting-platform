@@ -2,10 +2,12 @@
 
 import { FormEvent, useEffect, useState } from "react"
 import {
+  Archive,
   Check,
   ChevronDown,
   Copy,
   Database,
+  Download,
   Eye,
   EyeOff,
   KeyRound,
@@ -66,6 +68,46 @@ type CreateDatabaseResponse = {
 type DatabaseDetail = DatabaseItem & { password: string }
 
 type Action = "start" | "stop" | "restart"
+
+type Backup = {
+  id: string
+  database_id: string
+  filename: string
+  size_bytes: string | null
+  status: string
+  error_message: string | null
+  created_at: string
+}
+
+function formatBytes(bytes: number | null) {
+  if (bytes === null || !Number.isFinite(bytes)) {
+    return "—"
+  }
+
+  if (bytes === 0) {
+    return "0 B"
+  }
+
+  const units = ["B", "KB", "MB", "GB", "TB"]
+  const index = Math.floor(Math.log(bytes) / Math.log(1024))
+  const safeIndex = Math.min(index, units.length - 1)
+
+  return `${(bytes / Math.pow(1024, safeIndex)).toFixed(2)} ${units[safeIndex]}`
+}
+
+function backupStatus(status: string): {
+  label: string
+  tone: "success" | "warning" | "danger"
+} {
+  switch (status) {
+    case "completed":
+      return { label: "Terminée", tone: "success" }
+    case "failed":
+      return { label: "Échec", tone: "danger" }
+    default:
+      return { label: "En cours…", tone: "warning" }
+  }
+}
 
 export default function DatabasesPage() {
   const [databases, setDatabases] = useState<DatabaseItem[]>([])
@@ -363,6 +405,14 @@ function DatabaseRow({
   const [actionLoading, setActionLoading] = useState<Action | null>(null)
   const [deleting, setDeleting] = useState(false)
 
+  const [backups, setBackups] = useState<Backup[]>([])
+  const [backupsLoading, setBackupsLoading] = useState(false)
+  const [backingUp, setBackingUp] = useState(false)
+  const [backupError, setBackupError] = useState<string | null>(null)
+  const [backupDeletingId, setBackupDeletingId] = useState<string | null>(
+    null
+  )
+
   const status = siteStatus(database.status)
   const online = database.status === "online"
 
@@ -394,12 +444,101 @@ function DatabaseRow({
     }
   }
 
+  const loadBackups = async () => {
+    setBackupsLoading(true)
+
+    try {
+      const response = await fetch(`/api/databases/${database.id}/backups`, {
+        cache: "no-store",
+      })
+      const data = await response.json()
+
+      if (response.ok && data.status === "ok") {
+        setBackups(data.backups ?? [])
+      }
+    } catch (err) {
+      console.error("Erreur lors du chargement des sauvegardes :", err)
+    } finally {
+      setBackupsLoading(false)
+    }
+  }
+
   const toggleExpanded = () => {
     const next = !expanded
     setExpanded(next)
 
     if (next && !detail && !detailLoading) {
       loadDetail()
+    }
+
+    if (next && backups.length === 0 && !backupsLoading) {
+      loadBackups()
+    }
+  }
+
+  const createBackup = async () => {
+    setBackingUp(true)
+    setBackupError(null)
+
+    try {
+      const response = await fetch(`/api/databases/${database.id}/backups`, {
+        method: "POST",
+      })
+
+      const data = await response.json()
+
+      if (!response.ok || data.status !== "ok") {
+        throw new Error(data.message ?? "Impossible de créer la sauvegarde.")
+      }
+
+      await loadBackups()
+    } catch (err) {
+      setBackupError(
+        err instanceof Error
+          ? err.message
+          : "Impossible de créer la sauvegarde."
+      )
+    } finally {
+      setBackingUp(false)
+    }
+  }
+
+  const deleteBackup = async (backup: Backup) => {
+    const confirmed = window.confirm(
+      `Supprimer la sauvegarde du ${new Date(
+        backup.created_at
+      ).toLocaleString("fr-FR")} ?`
+    )
+
+    if (!confirmed) {
+      return
+    }
+
+    setBackupDeletingId(backup.id)
+
+    try {
+      const response = await fetch(
+        `/api/databases/${database.id}/backups/${backup.id}`,
+        { method: "DELETE" }
+      )
+
+      const data = await response.json()
+
+      if (!response.ok || data.status !== "ok") {
+        throw new Error(
+          data.message ?? "Impossible de supprimer la sauvegarde."
+        )
+      }
+
+      await loadBackups()
+    } catch (err) {
+      alert(
+        err instanceof Error
+          ? err.message
+          : "Impossible de supprimer la sauvegarde."
+      )
+    } finally {
+      setBackupDeletingId(null)
     }
   }
 
@@ -652,6 +791,24 @@ function DatabaseRow({
               </Button>
 
               <Button
+                variant="secondary"
+                onClick={createBackup}
+                disabled={!online || backingUp || deleting}
+                title={
+                  online
+                    ? undefined
+                    : "La base doit être en ligne pour être sauvegardée."
+                }
+              >
+                {backingUp ? (
+                  <Spinner className="text-current" />
+                ) : (
+                  <Archive />
+                )}
+                {backingUp ? "Sauvegarde…" : "Sauvegarder"}
+              </Button>
+
+              <Button
                 variant="destructive"
                 onClick={handleDelete}
                 disabled={deleting || actionLoading !== null}
@@ -671,6 +828,102 @@ function DatabaseRow({
               </pre>
             </div>
           )}
+
+          <div>
+            <div className="mb-2.5 flex items-center justify-between">
+              <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground/70">
+                Sauvegardes
+              </p>
+
+              <Button variant="ghost" size="icon-sm" onClick={loadBackups}>
+                <RefreshCw className={cn(backupsLoading && "animate-spin")} />
+              </Button>
+            </div>
+
+            {backupError && (
+              <p className="mb-2.5 text-sm text-danger">{backupError}</p>
+            )}
+
+            {backupsLoading && backups.length === 0 ? (
+              <div className="flex min-h-16 items-center justify-center">
+                <Spinner className="size-5" />
+              </div>
+            ) : backups.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                Aucune sauvegarde pour l&apos;instant.
+              </p>
+            ) : (
+              <div className="divide-y divide-border overflow-hidden rounded-lg border border-border">
+                {backups.map((backup) => {
+                  const backupStatusInfo = backupStatus(backup.status)
+                  const busy = backupDeletingId === backup.id
+
+                  return (
+                    <div
+                      key={backup.id}
+                      className="flex flex-col gap-2 bg-card p-3 sm:flex-row sm:items-center sm:justify-between"
+                    >
+                      <div className="flex items-center gap-3">
+                        <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground [&_svg]:size-4">
+                          <Archive />
+                        </span>
+
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className="text-sm font-medium">
+                              {new Date(backup.created_at).toLocaleString(
+                                "fr-FR"
+                              )}
+                            </p>
+                            <StatusPill tone={backupStatusInfo.tone}>
+                              {backupStatusInfo.label}
+                            </StatusPill>
+                          </div>
+
+                          <p className="mt-0.5 text-xs text-muted-foreground">
+                            {formatBytes(
+                              backup.size_bytes !== null
+                                ? Number(backup.size_bytes)
+                                : null
+                            )}
+                            {backup.error_message
+                              ? ` · ${backup.error_message}`
+                              : ""}
+                          </p>
+                        </div>
+                      </div>
+
+                      {backup.status === "completed" && (
+                        <div className="flex gap-2">
+                          <a
+                            href={`/api/databases/${database.id}/backups/${backup.id}/download`}
+                            className="inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border border-border bg-card px-3 text-[0.8125rem] font-medium shadow-xs transition-colors hover:bg-muted [&_svg]:size-3.5"
+                          >
+                            <Download />
+                            Télécharger
+                          </a>
+
+                          <Button
+                            variant="destructive"
+                            size="sm"
+                            onClick={() => deleteBackup(backup)}
+                            disabled={busy}
+                          >
+                            {busy ? (
+                              <Spinner className="text-current" />
+                            ) : (
+                              <Trash2 />
+                            )}
+                            Supprimer
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>
