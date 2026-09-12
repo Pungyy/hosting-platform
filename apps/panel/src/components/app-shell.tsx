@@ -36,14 +36,14 @@ const navigation: NavSection[] = [
     items: [
       { href: "/", label: "Dashboard", icon: LayoutDashboard },
       { href: "/sites", label: "Sites", icon: Globe },
+      { href: "/domains", label: "Domaines", icon: Globe },
       { href: "/servers", label: "Serveurs", icon: Server },
+      { href: "/deployments", label: "Déploiements", icon: Rocket },
     ],
   },
   {
     title: "Bientôt",
     items: [
-      { href: "/domains", label: "Domaines", icon: Globe, soon: true },
-      { href: "/deployments", label: "Déploiements", icon: Rocket, soon: true },
       { href: "/databases", label: "Bases de données", icon: Database, soon: true },
       { href: "/backups", label: "Sauvegardes", icon: HardDrive, soon: true },
     ],

@@ -331,16 +331,16 @@ export default function Home() {
               description="Déployer un nouveau site"
             />
             <QuickAction
-              href="/servers"
+              href="/deployments"
               icon={<Rocket />}
               title="Déploiements"
-              description="Déployer depuis Git"
+              description="Historique des déploiements"
             />
             <QuickAction
-              href="/servers"
-              icon={<Database />}
-              title="Infrastructure"
-              description="Surveiller les serveurs"
+              href="/domains"
+              icon={<Globe />}
+              title="Domaines"
+              description="Gérer vos noms de domaine"
             />
           </CardContent>
         </Card>
