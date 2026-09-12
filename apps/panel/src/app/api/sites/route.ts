@@ -2,25 +2,44 @@ import { NextResponse } from "next/server"
 import { z } from "zod"
 
 import { requireSession } from "@/lib/auth/guard"
+import {
+  createAgentSite,
+  deleteAgentSite,
+  getAgentSiteStatuses,
+} from "@/lib/agent/client"
 import { query } from "@/lib/database"
 
 const createSiteSchema = z.object({
   name: z
     .string()
     .trim()
-    .min(
-      3,
-      "Le nom doit contenir au moins 3 caractères.",
-    )
-    .max(
-      40,
-      "Le nom ne peut pas dépasser 40 caractères.",
-    )
+    .min(3, "Le nom doit contenir au moins 3 caractères.")
+    .max(40, "Le nom ne peut pas dépasser 40 caractères.")
     .regex(
       /^[a-z0-9]+(?:-[a-z0-9]+)*$/,
       "Le nom doit contenir uniquement des lettres minuscules, chiffres et tirets.",
     ),
 })
+
+type SiteRow = {
+  id: string
+  name: string
+  container_name: string
+  container_id: string | null
+  image: string
+  status: string
+  created_at: string
+  server_id: string
+}
+
+type AgentCreatedSite = {
+  id: string
+  name: string
+  containerName: string
+  image: string
+  state: string
+  running: boolean
+}
 
 type AgentSiteStatus = {
   name: string | null
@@ -30,98 +49,25 @@ type AgentSiteStatus = {
   running: boolean
 }
 
-type AgentStatusesResponse = {
-  status?: string
-  message?: string
-  sites?: AgentSiteStatus[]
-}
-
 /*
- * Récupération des statuts réels depuis l'Agent.
- *
- * Le Panel ne parle jamais directement à Docker.
- * Il passe toujours par l'Agent.
+ * Un Agent est considéré joignable si un heartbeat a été reçu
+ * récemment. On évite ainsi d'attendre le timeout d'un Agent
+ * injoignable (ex. tunnel mort) à chaque rafraîchissement.
  */
-async function getAgentSiteStatuses() {
-  const agentUrl =
-    process.env.AGENT_URL
-
-  const agentToken =
-    process.env.AGENT_TOKEN
-
-  if (!agentUrl || !agentToken) {
-    throw new Error(
-      "Configuration de l'Agent manquante.",
-    )
-  }
-
-  const response =
-    await fetch(
-      `${agentUrl}/sites/statuses`,
-      {
-        method: "GET",
-        headers: {
-          Authorization:
-            `Bearer ${agentToken}`,
-        },
-        cache: "no-store",
-      },
-    )
-
-  const text =
-    await response.text()
-
-  let data: AgentStatusesResponse = {}
-
-  if (text) {
-    try {
-      data =
-        JSON.parse(text)
-    } catch {
-      throw new Error(
-        "Réponse invalide de l'Agent.",
-      )
-    }
-  }
-
-  if (
-    !response.ok ||
-    data.status !== "ok" ||
-    !Array.isArray(data.sites)
-  ) {
-    throw new Error(
-      data.message ??
-        "Impossible de récupérer les statuts des sites depuis l'Agent.",
-    )
-  }
-
-  return data.sites
-}
+const RECENT_HEARTBEAT_MS = 2 * 60 * 1000
 
 /*
  * GET /api/sites
  *
- * Récupère les sites PostgreSQL puis
- * synchronise leur statut avec Docker.
+ * Sites PostgreSQL + synchronisation de leur statut avec Docker,
+ * en interrogeant l'Agent de CHAQUE serveur (pas seulement le local).
  */
 export async function GET() {
   try {
     const { response: authError } = await requireSession()
     if (authError) return authError
 
-    /*
-     * Récupération des sites en base.
-     */
-    const result = await query<{
-      id: string
-      name: string
-      container_name: string
-      container_id: string | null
-      image: string
-      status: string
-      created_at: string
-      server_id: string
-    }>(`
+    const sitesResult = await query<SiteRow>(`
       SELECT
         s.id,
         s.name,
@@ -135,179 +81,151 @@ export async function GET() {
       ORDER BY s.created_at DESC
     `)
 
-    const sites =
-      result.rows
+    const sites = sitesResult.rows
 
     /*
-     * Récupération des statuts réels
-     * depuis Docker via l'Agent.
+     * Serveurs à interroger : ceux qui portent au moins un site ET
+     * qui sont contactables — soit un Agent enrôlé vu récemment,
+     * soit un serveur sans `agent_url` (fallback dev local, voir
+     * lib/agent/client.ts → getAgentConfig). Ce deuxième cas est
+     * important : le heartbeat de l'Agent local met à jour la ligne
+     * `servers` correspondant à SON enrôlement (ex. "Test VPS"), pas
+     * forcément celle à laquelle les sites locaux sont rattachés
+     * (ex. "Local Docker", qui n'a jamais de `last_seen_at`).
      */
-    let agentSites:
-      AgentSiteStatus[] = []
+    const serversResult = await query<{
+      id: string
+      agent_url: string | null
+      last_seen_at: string | null
+    }>(`SELECT id, agent_url, last_seen_at FROM servers`)
 
-    try {
-      agentSites =
-        await getAgentSiteStatuses()
-    } catch (agentError) {
-      /*
-       * Si l'Agent est momentanément
-       * indisponible, on retourne les données
-       * PostgreSQL sans faire échouer toute
-       * la page.
-       */
-      console.error(
-        "GET /api/sites - Agent status sync error:",
-        agentError,
-      )
+    const now = Date.now()
 
-      return NextResponse.json({
-        status: "ok",
-        sites,
-        sync: {
-          status: "unavailable",
-          message:
-            "Impossible de synchroniser les statuts Docker.",
-        },
-      })
-    }
+    const freshServerIds = new Set(
+      serversResult.rows
+        .filter(
+          (row) =>
+            row.agent_url === null ||
+            (row.last_seen_at !== null &&
+              now - new Date(row.last_seen_at).getTime() <
+                RECENT_HEARTBEAT_MS),
+        )
+        .map((row) => row.id),
+    )
+
+    const siteServerIds = [
+      ...new Set(sites.map((site) => site.server_id)),
+    ]
+
+    const targetServerIds = siteServerIds.filter((id) =>
+      freshServerIds.has(id),
+    )
 
     /*
-     * Création d'un index par nom de site
-     * pour éviter de parcourir les tableaux
-     * plusieurs fois.
+     * Récupération des statuts, un appel par serveur, en parallèle.
      */
-    const agentSitesByName =
-      new Map<string, AgentSiteStatus>()
+    const statusByKey = new Map<string, AgentSiteStatus>()
+    const unreachableServers: string[] = []
 
-    for (const agentSite of agentSites) {
-      if (!agentSite.name) {
+    const settled = await Promise.allSettled(
+      targetServerIds.map(async (serverId) => {
+        const data = await getAgentSiteStatuses(serverId)
+        return { serverId, agentSites: data.sites }
+      }),
+    )
+
+    settled.forEach((result, index) => {
+      const serverId = targetServerIds[index]
+
+      if (result.status === "rejected") {
+        unreachableServers.push(serverId)
+        console.error(
+          `GET /api/sites — Agent injoignable (serveur ${serverId}) :`,
+          result.reason,
+        )
+        return
+      }
+
+      for (const agentSite of result.value.agentSites) {
+        if (agentSite.name) {
+          statusByKey.set(
+            `${serverId}:${agentSite.name}`,
+            agentSite,
+          )
+        }
+      }
+    })
+
+    const contactedServerIds = new Set(
+      targetServerIds.filter(
+        (id) => !unreachableServers.includes(id),
+      ),
+    )
+
+    /*
+     * Réconciliation PostgreSQL <- état réel Docker, uniquement
+     * pour les sites dont le serveur a répondu.
+     */
+    for (const site of sites) {
+      if (!contactedServerIds.has(site.server_id)) {
         continue
       }
 
-      agentSitesByName.set(
-        agentSite.name,
-        agentSite,
+      const agentSite = statusByKey.get(
+        `${site.server_id}:${site.name}`,
       )
-    }
 
-    /*
-     * Synchronisation PostgreSQL → état réel Docker.
-     */
-    for (const site of sites) {
-      const agentSite =
-        agentSitesByName.get(
-          site.name,
-        )
-
-      /*
-       * Le container n'existe plus côté Docker.
-       *
-       * On considère alors le site comme arrêté
-       * dans PostgreSQL.
-       */
       if (!agentSite) {
         if (site.status !== "stopped") {
           await query(
-            `
-              UPDATE sites
-              SET
-                status = 'stopped'
-              WHERE id = $1
-            `,
+            `UPDATE sites SET status = 'stopped' WHERE id = $1`,
             [site.id],
           )
-
-          site.status =
-            "stopped"
+          site.status = "stopped"
         }
-
         continue
       }
 
-      /*
-       * Conversion de l'état Docker
-       * vers notre état métier.
-       *
-       * running → online
-       * tout autre état → stopped
-       */
-      const newStatus =
-        agentSite.running
-          ? "online"
-          : "stopped"
+      const newStatus = agentSite.running ? "online" : "stopped"
 
-      /*
-       * On n'effectue une requête UPDATE
-       * que si le statut a réellement changé.
-       */
-      if (
-        site.status !== newStatus
-      ) {
+      if (site.status !== newStatus) {
         await query(
-          `
-            UPDATE sites
-            SET
-              status = $1
-            WHERE id = $2
-          `,
-          [
-            newStatus,
-            site.id,
-          ],
+          `UPDATE sites SET status = $1 WHERE id = $2`,
+          [newStatus, site.id],
         )
-
-        site.status =
-          newStatus
+        site.status = newStatus
       }
 
-      /*
-       * On met également à jour le container_id
-       * si Docker nous fournit un nouvel ID.
-       */
-      if (
-        site.container_id !==
-        agentSite.containerId
-      ) {
+      if (site.container_id !== agentSite.containerId) {
         await query(
-          `
-            UPDATE sites
-            SET
-              container_id = $1
-            WHERE id = $2
-          `,
-          [
-            agentSite.containerId,
-            site.id,
-          ],
+          `UPDATE sites SET container_id = $1 WHERE id = $2`,
+          [agentSite.containerId, site.id],
         )
-
-        site.container_id =
-          agentSite.containerId
+        site.container_id = agentSite.containerId
       }
     }
+
+    const fullySynced =
+      unreachableServers.length === 0 &&
+      contactedServerIds.size === siteServerIds.length
 
     return NextResponse.json({
       status: "ok",
       sites,
       sync: {
-        status: "synchronized",
+        status: fullySynced ? "synchronized" : "partial",
+        unreachableServers,
       },
     })
   } catch (error) {
-    console.error(
-      "GET /api/sites error:",
-      error,
-    )
+    console.error("GET /api/sites error:", error)
 
     return NextResponse.json(
       {
         status: "error",
-        message:
-          "Impossible de récupérer les sites.",
+        message: "Impossible de récupérer les sites.",
       },
-      {
-        status: 500,
-      },
+      { status: 500 },
     )
   }
 }
@@ -315,86 +233,46 @@ export async function GET() {
 /*
  * POST /api/sites
  *
- * Création d'un nouveau site.
+ * Création d'un site sur le premier serveur joignable.
  */
-export async function POST(
-  request: Request,
-) {
+export async function POST(request: Request) {
   try {
     const { response: authError } = await requireSession()
     if (authError) return authError
 
-    /*
-     * Vérification du body JSON.
-     */
-    const body = await request
-      .json()
-      .catch(() => null)
+    const body = await request.json().catch(() => null)
 
-    /*
-     * Validation du nom.
-     */
-    const result =
-      createSiteSchema.safeParse(body)
+    const parsed = createSiteSchema.safeParse(body)
 
-    if (!result.success) {
+    if (!parsed.success) {
       return NextResponse.json(
         {
           status: "error",
           message: "Données invalides.",
-          errors: result.error.flatten(),
+          errors: parsed.error.flatten(),
         },
-        {
-          status: 400,
-        },
+        { status: 400 },
       )
     }
 
-    const { name } = result.data
+    const { name } = parsed.data
 
     /*
-     * Vérification des variables d'environnement.
-     */
-    const agentUrl =
-      process.env.AGENT_URL
-
-    const agentToken =
-      process.env.AGENT_TOKEN
-
-    if (!agentUrl || !agentToken) {
-      console.error(
-        "AGENT_URL ou AGENT_TOKEN manquant.",
-      )
-
-      return NextResponse.json(
-        {
-          status: "error",
-          message:
-            "Configuration de l'Agent manquante.",
-        },
-        {
-          status: 500,
-        },
-      )
-    }
-
-    /*
-     * Vérification qu'un serveur existe.
+     * Choix du serveur : le plus ancien qui soit contactable — Agent
+     * enrôlé vu récemment, ou serveur sans `agent_url` (fallback dev
+     * local, voir getAgentConfig). Pas la colonne `status`, potentiellement
+     * obsolète.
      */
     const serverResult = await query<{
       id: string
       name: string
       hostname: string
-      status: string
     }>(
       `
-        SELECT
-          id,
-          name,
-          hostname,
-          status
+        SELECT id, name, hostname
         FROM servers
-        WHERE status = 'online'
+        WHERE agent_url IS NULL
+           OR last_seen_at > NOW() - INTERVAL '2 minutes'
         ORDER BY created_at ASC
         LIMIT 1
       `,
@@ -404,320 +282,153 @@ export async function POST(
       return NextResponse.json(
         {
           status: "error",
-          message:
-            "Aucun serveur disponible.",
+          message: "Aucun serveur joignable pour héberger le site.",
         },
-        {
-          status: 503,
-        },
+        { status: 503 },
       )
     }
 
-    const server =
-      serverResult.rows[0]
+    const server = serverResult.rows[0]
 
-    /*
-     * Vérification que le nom n'est pas
-     * déjà utilisé dans PostgreSQL.
-     */
-    const existingSite =
-      await query<{ id: string }>(
-        `
-          SELECT id
-          FROM sites
-          WHERE name = $1
-          LIMIT 1
-        `,
-        [name],
-      )
+    const existingSite = await query<{ id: string }>(
+      `SELECT id FROM sites WHERE name = $1 LIMIT 1`,
+      [name],
+    )
 
     if (existingSite.rows.length > 0) {
       return NextResponse.json(
         {
           status: "error",
-          message:
-            `Le site "${name}" existe déjà.`,
+          message: `Le site "${name}" existe déjà.`,
         },
-        {
-          status: 409,
-        },
+        { status: 409 },
       )
     }
 
     /*
-     * Création du site côté Agent.
-     *
-     * Le Panel ne parle jamais directement
-     * à Docker.
+     * Création du container via l'Agent du serveur choisi.
      */
-    const agentResponse =
-      await fetch(
-        `${agentUrl}/sites`,
-        {
-          method: "POST",
-          headers: {
-            Authorization:
-              `Bearer ${agentToken}`,
-            "Content-Type":
-              "application/json",
-          },
-          body: JSON.stringify({
-            name,
-          }),
-          cache: "no-store",
-        },
-      )
+    let agentSite: AgentCreatedSite
 
-    const agentText =
-      await agentResponse.text()
+    try {
+      const agentResponse = (await createAgentSite(server.id, {
+        name,
+      })) as { site?: AgentCreatedSite }
 
-    let agentData: {
-      status?: string
-      message?: string
-      site?: {
-        id: string
-        name: string
-        containerName: string
-        image: string
-        state: string
-        running: boolean
-      }
-    } = {}
-
-    if (agentText) {
-      try {
-        agentData =
-          JSON.parse(agentText)
-      } catch {
-        console.error(
-          "Réponse invalide de l'Agent:",
-          agentText,
+      if (!agentResponse.site) {
+        throw new Error(
+          "L'Agent n'a pas retourné les informations du site.",
         )
       }
-    }
 
-    if (
-      !agentResponse.ok ||
-      agentData.status !== "ok" ||
-      !agentData.site
-    ) {
-      console.error(
-        "Agent create site error:",
-        {
-          status:
-            agentResponse.status,
-          response: agentText,
-        },
-      )
-
+      agentSite = agentResponse.site
+    } catch (agentError) {
       return NextResponse.json(
         {
           status: "error",
           message:
-            agentData.message ??
-            "Impossible de créer le site sur l'Agent.",
+            agentError instanceof Error
+              ? agentError.message
+              : "Impossible de créer le site sur l'Agent.",
         },
-        {
-          status:
-            agentResponse.status >= 400 &&
-            agentResponse.status < 600
-              ? agentResponse.status
-              : 502,
-        },
+        { status: 502 },
       )
     }
 
-    const agentSite =
-      agentData.site
-
     /*
-     * Création de l'utilisateur système
-     * local si nécessaire.
-     *
-     * Cela nous permet de garder le schéma
-     * actuel fonctionnel avant la mise en place
-     * du véritable système d'authentification.
+     * Utilisateur propriétaire : le premier de la base pour
+     * l'instant (à remplacer par l'utilisateur connecté quand
+     * les permissions seront en place).
      */
-    const userResult = await query<{
-      id: string
-    }>(
-      `
-        SELECT id
-        FROM users
-        ORDER BY created_at ASC
-        LIMIT 1
-      `,
+    const userResult = await query<{ id: string }>(
+      `SELECT id FROM users ORDER BY created_at ASC LIMIT 1`,
     )
 
-    let userId: string
-
-    if (userResult.rows.length > 0) {
-      userId =
-        userResult.rows[0].id
-    } else {
-      const newUser =
-        await query<{ id: string }>(
-          `
-            INSERT INTO users (
-              email,
-              name
-            )
-            VALUES (
-              $1,
-              $2
-            )
-            RETURNING id
-          `,
-          [
-            "admin@hosting.local",
-            "Administrator",
-          ],
-        )
-
-      userId =
-        newUser.rows[0].id
+    if (userResult.rows.length === 0) {
+      return NextResponse.json(
+        {
+          status: "error",
+          message: "Aucun utilisateur disponible.",
+        },
+        { status: 500 },
+      )
     }
 
-    /*
-     * Enregistrement du site dans PostgreSQL.
-     */
+    const userId = userResult.rows[0].id
+
     try {
-      const siteResult =
-        await query<{
-          id: string
-          name: string
-          container_name: string
-          container_id: string | null
-          image: string
-          status: string
-          created_at: string
-          server_id: string
-        }>(
-          `
-            INSERT INTO sites (
-              user_id,
-              server_id,
-              name,
-              container_name,
-              container_id,
-              image,
-              status
-            )
-            VALUES (
-              $1,
-              $2,
-              $3,
-              $4,
-              $5,
-              $6,
-              $7
-            )
-            RETURNING
-              id,
-              name,
-              container_name,
-              container_id,
-              image,
-              status,
-              created_at,
-              server_id
-          `,
-          [
-            userId,
-            server.id,
-            name,
-            agentSite.containerName,
-            agentSite.id,
-            agentSite.image,
-            agentSite.running
-              ? "online"
-              : "stopped",
-          ],
-        )
-
-      const site =
-        siteResult.rows[0]
-
-      /*
-       * Création automatique du domaine
-       * local de développement.
-       */
-      await query(
+      const siteResult = await query<SiteRow>(
         `
-          INSERT INTO domains (
-            site_id,
-            domain,
-            is_primary
+          INSERT INTO sites (
+            user_id,
+            server_id,
+            name,
+            container_name,
+            container_id,
+            image,
+            status
           )
-          VALUES (
-            $1,
-            $2,
-            true
-          )
-          ON CONFLICT DO NOTHING
+          VALUES ($1, $2, $3, $4, $5, $6, $7)
+          RETURNING
+            id,
+            name,
+            container_name,
+            container_id,
+            image,
+            status,
+            created_at,
+            server_id
         `,
         [
-          site.id,
-          `${name}.localhost`,
+          userId,
+          server.id,
+          name,
+          agentSite.containerName,
+          agentSite.id,
+          agentSite.image,
+          agentSite.running ? "online" : "stopped",
         ],
       )
 
-      return NextResponse.json(
-        {
-          status: "ok",
-          site,
-        },
-        {
-          status: 201,
-        },
+      const site = siteResult.rows[0]
+
+      await query(
+        `
+          INSERT INTO domains (site_id, domain, is_primary)
+          VALUES ($1, $2, true)
+          ON CONFLICT DO NOTHING
+        `,
+        [site.id, `${name}.localhost`],
       )
+
+      return NextResponse.json({ status: "ok", site }, { status: 201 })
     } catch (databaseError) {
       console.error(
-        "Database error after Agent site creation:",
+        "POST /api/sites — échec BDD après création Agent :",
         databaseError,
       )
 
       /*
-       * Si PostgreSQL échoue après la création
-       * Docker, on tente de nettoyer le container.
+       * Nettoyage best-effort du container orphelin.
        */
-      try {
-        await fetch(
-          `${agentUrl}/sites/${encodeURIComponent(
-            name,
-          )}`,
-          {
-            method: "DELETE",
-            headers: {
-              Authorization:
-                `Bearer ${agentToken}`,
-            },
-            cache: "no-store",
-          },
-        )
-      } catch (cleanupError) {
+      await deleteAgentSite(server.id, name).catch((cleanupError) => {
         console.error(
-          "Impossible de nettoyer le site Agent:",
+          "POST /api/sites — nettoyage du container impossible :",
           cleanupError,
         )
-      }
+      })
 
       return NextResponse.json(
         {
           status: "error",
           message:
-            "Le site Docker a été créé mais son enregistrement en base a échoué.",
+            "Le container a été créé mais son enregistrement en base a échoué.",
         },
-        {
-          status: 500,
-        },
+        { status: 500 },
       )
     }
   } catch (error) {
-    console.error(
-      "POST /api/sites error:",
-      error,
-    )
+    console.error("POST /api/sites error:", error)
 
     return NextResponse.json(
       {
@@ -727,9 +438,7 @@ export async function POST(
             ? error.message
             : "Impossible de créer le site.",
       },
-      {
-        status: 500,
-      },
+      { status: 500 },
     )
   }
 }

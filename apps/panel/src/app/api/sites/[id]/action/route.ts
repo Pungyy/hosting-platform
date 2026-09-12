@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server"
 
 import { requireSession } from "@/lib/auth/guard"
+import { agentSiteAction } from "@/lib/agent/client"
 import { query } from "@/lib/database"
 
 type RouteContext = {
@@ -9,16 +10,19 @@ type RouteContext = {
   }>
 }
 
-type Action =
-  | "start"
-  | "stop"
-  | "restart"
+const ALLOWED_ACTIONS = ["start", "stop", "restart"] as const
 
-const AGENT_URL =
-  process.env.AGENT_URL
+type Action = (typeof ALLOWED_ACTIONS)[number]
 
-const AGENT_TOKEN =
-  process.env.AGENT_TOKEN
+type AgentActionResult = {
+  status?: string
+  site?: {
+    name: string
+    containerId: string
+    status: string
+    running: boolean
+  }
+}
 
 export async function POST(
   request: Request,
@@ -28,31 +32,13 @@ export async function POST(
     const { response: authError } = await requireSession()
     if (authError) return authError
 
-    if (!AGENT_URL || !AGENT_TOKEN) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message:
-            "Configuration Agent manquante.",
-        },
-        { status: 500 },
-      )
-    }
-
     const { id } = await params
 
-    const body =
-      await request.json().catch(() => null)
+    const body = await request.json().catch(() => null)
 
     const action = body?.action as Action
 
-    if (
-      ![
-        "start",
-        "stop",
-        "restart",
-      ].includes(action)
-    ) {
+    if (!ALLOWED_ACTIONS.includes(action)) {
       return NextResponse.json(
         {
           status: "error",
@@ -66,12 +52,10 @@ export async function POST(
       id: string
       name: string
       container_name: string
+      server_id: string
     }>(
       `
-        SELECT
-          id,
-          name,
-          container_name
+        SELECT id, name, container_name, server_id
         FROM sites
         WHERE id = $1
         LIMIT 1
@@ -91,49 +75,28 @@ export async function POST(
 
     const site = siteResult.rows[0]
 
-    const response = await fetch(
-      `${AGENT_URL}/sites/${encodeURIComponent(
+    let data: AgentActionResult
+
+    try {
+      data = (await agentSiteAction(
+        site.server_id,
         site.name,
-      )}/action`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type":
-            "application/json",
-          Authorization: `Bearer ${AGENT_TOKEN}`,
-        },
-        body: JSON.stringify({
-          action,
-        }),
-        cache: "no-store",
-      },
-    )
-
-    const data =
-      await response.json().catch(
-        () => null,
-      )
-
-    if (!response.ok) {
+        action,
+      )) as AgentActionResult
+    } catch (agentError) {
       return NextResponse.json(
         {
           status: "error",
           message:
-            data?.message ??
-            "L'Agent a refusé l'action.",
+            agentError instanceof Error
+              ? agentError.message
+              : "L'Agent a refusé l'action.",
         },
-        { status: response.status },
+        { status: 502 },
       )
     }
 
-    const dockerStatus =
-      data?.site?.status ??
-      "unknown"
-
-    const dbStatus =
-      data?.site?.running
-        ? "online"
-        : "stopped"
+    const dbStatus = data.site?.running ? "online" : "stopped"
 
     await query(
       `
@@ -143,24 +106,17 @@ export async function POST(
           container_id = COALESCE($2, container_id)
         WHERE id = $3
       `,
-      [
-        dbStatus,
-        data?.site?.containerId ??
-          null,
-        id,
-      ],
+      [dbStatus, data.site?.containerId ?? null, id],
     )
 
     return NextResponse.json({
       status: "ok",
       action,
-      docker_status: dockerStatus,
+      docker_status: data.site?.status ?? "unknown",
       site: {
         ...site,
         status: dbStatus,
-        container_id:
-          data?.site?.containerId ??
-          null,
+        container_id: data.site?.containerId ?? null,
       },
     })
   } catch (error) {

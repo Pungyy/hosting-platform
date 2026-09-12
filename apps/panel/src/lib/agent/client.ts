@@ -12,6 +12,13 @@ type ServerAgentConfig = {
   agent_token_encrypted: string | null
 }
 
+/*
+ * Timeout par défaut des appels à l'Agent. Empêche une route du Panel
+ * de pendre indéfiniment quand un Agent est injoignable (ex. tunnel mort).
+ * Les appels longs (build de déploiement) passent leur propre `signal`.
+ */
+const DEFAULT_TIMEOUT_MS = 15_000
+
 async function getAgentConfig(
   serverId: string,
 ) {
@@ -105,25 +112,53 @@ async function agentRequest<T = AgentResponse>(
       serverId,
     )
 
-  const response =
-    await fetch(
-      `${agentUrl}${path}`,
-      {
-        ...options,
+  let response: Response
 
-        headers: {
-          "Content-Type":
-            "application/json",
+  try {
+    response =
+      await fetch(
+        `${agentUrl}${path}`,
+        {
+          ...options,
 
-          Authorization:
-            `Bearer ${agentToken}`,
+          signal:
+            options.signal ??
+            AbortSignal.timeout(
+              DEFAULT_TIMEOUT_MS,
+            ),
 
-          ...(options.headers ?? {}),
+          headers: {
+            "Content-Type":
+              "application/json",
+
+            Authorization:
+              `Bearer ${agentToken}`,
+
+            ...(options.headers ?? {}),
+          },
+
+          cache: "no-store",
         },
+      )
+  } catch (error) {
+    const name =
+      (error as Error).name
 
-        cache: "no-store",
-      },
+    if (
+      name === "TimeoutError" ||
+      name === "AbortError"
+    ) {
+      throw new Error(
+        "L'Agent n'a pas répondu à temps.",
+      )
+    }
+
+    throw new Error(
+      `Impossible de joindre l'Agent : ${
+        (error as Error).message
+      }`,
     )
+  }
 
   const text =
     await response.text()
@@ -226,7 +261,10 @@ export async function agentSiteAction(
 export async function updateAgentSiteDomains(
   serverId: string,
   siteName: string,
-  domains: string[],
+  domains: Array<{
+    domain: string
+    sslEnabled?: boolean
+  }>,
 ) {
   return agentRequest(
     serverId,
@@ -273,11 +311,7 @@ export async function getAgentSiteLogs(
 ) {
   return agentRequest<{
     status: string
-    site: {
-      name: string
-      containerId: string
-      logs: string
-    }
+    logs: string
   }>(
     serverId,
     `/sites/${encodeURIComponent(siteName)}/logs`,
@@ -311,6 +345,14 @@ export async function deployAgentSite(
     {
       method: "POST",
       body: JSON.stringify(data),
+
+      /*
+       * Le build (clone + docker build + swap de container) est
+       * synchrone côté Agent et peut durer plusieurs minutes.
+       */
+      signal: AbortSignal.timeout(
+        10 * 60 * 1000,
+      ),
     },
   )
 }

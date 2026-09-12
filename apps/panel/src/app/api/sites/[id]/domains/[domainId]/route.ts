@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server"
 
 import { requireSession } from "@/lib/auth/guard"
+import { updateAgentSiteDomains } from "@/lib/agent/client"
 import { query } from "@/lib/database"
 
 type RouteContext = {
@@ -23,6 +24,7 @@ type DomainRow = {
 type SiteRow = {
   id: string
   name: string
+  server_id: string
 }
 
 type UpdateDomainBody = {
@@ -30,61 +32,22 @@ type UpdateDomainBody = {
   sslEnabled?: unknown
 }
 
-const AGENT_URL =
-  process.env.AGENT_URL
-
-const AGENT_TOKEN =
-  process.env.AGENT_TOKEN
-
+/*
+ * Pousse la liste complète des domaines du site vers l'Agent
+ * de son serveur, qui reconstruit les routers Traefik.
+ */
 async function syncDomainsWithAgent(
-  siteName: string,
+  site: { name: string; server_id: string },
   domains: Array<{
     domain: string
     sslEnabled: boolean
   }>,
 ) {
-  if (
-    !AGENT_URL ||
-    !AGENT_TOKEN
-  ) {
-    throw new Error(
-      "Configuration Agent manquante.",
-    )
-  }
-
-  const response =
-    await fetch(
-      `${AGENT_URL}/sites/${encodeURIComponent(
-        siteName,
-      )}/domains`,
-      {
-        method: "PUT",
-        headers: {
-          Authorization:
-            `Bearer ${AGENT_TOKEN}`,
-          "Content-Type":
-            "application/json",
-        },
-        body: JSON.stringify({
-          domains,
-        }),
-        cache: "no-store",
-      },
-    )
-
-  const data =
-    await response
-      .json()
-      .catch(() => null)
-
-  if (!response.ok) {
-    throw new Error(
-      data?.message ??
-        "Impossible de synchroniser les domaines avec Traefik.",
-    )
-  }
-
-  return data
+  return updateAgentSiteDomains(
+    site.server_id,
+    site.name,
+    domains,
+  )
 }
 
 async function getSite(
@@ -95,7 +58,8 @@ async function getSite(
       `
         SELECT
           id,
-          name
+          name,
+          server_id
         FROM sites
         WHERE id = $1
         LIMIT 1
@@ -459,7 +423,7 @@ export async function PATCH(
         await getSiteDomains(id)
 
       await syncDomainsWithAgent(
-        site.name,
+        site,
         domains,
       )
     } catch (syncError) {
@@ -715,7 +679,7 @@ export async function DELETE(
       }
 
       await syncDomainsWithAgent(
-        site.name,
+        site,
         domains,
       )
     } catch (syncError) {

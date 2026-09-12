@@ -2,6 +2,7 @@ import { NextResponse } from "next/server"
 import { z } from "zod"
 
 import { requireSession } from "@/lib/auth/guard"
+import { deleteAgentSite } from "@/lib/agent/client"
 import { query } from "@/lib/database"
 
 type RouteContext = {
@@ -48,12 +49,6 @@ const updateSiteSchema = z
       data.repositoryBranch !== undefined,
     { message: "Aucune donnée à modifier." },
   )
-
-const AGENT_URL =
-  process.env.AGENT_URL
-
-const AGENT_TOKEN =
-  process.env.AGENT_TOKEN
 
 export async function GET(
   _request: Request,
@@ -252,32 +247,15 @@ export async function DELETE(
     const { response: authError } = await requireSession()
     if (authError) return authError
 
-    if (
-      !AGENT_URL ||
-      !AGENT_TOKEN
-    ) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message:
-            "Configuration Agent manquante.",
-        },
-        {
-          status: 500,
-        },
-      )
-    }
-
     const { id } = await params
 
     const result = await query<{
       id: string
       name: string
+      server_id: string
     }>(
       `
-        SELECT
-          id,
-          name
+        SELECT id, name, server_id
         FROM sites
         WHERE id = $1
         LIMIT 1
@@ -300,37 +278,18 @@ export async function DELETE(
     const site =
       result.rows[0]
 
-    const response =
-      await fetch(
-        `${AGENT_URL}/sites/${encodeURIComponent(
-          site.name,
-        )}`,
-        {
-          method: "DELETE",
-          headers: {
-            Authorization:
-              `Bearer ${AGENT_TOKEN}`,
-          },
-          cache: "no-store",
-        },
-      )
-
-    const data =
-      await response
-        .json()
-        .catch(() => null)
-
-    if (!response.ok) {
+    try {
+      await deleteAgentSite(site.server_id, site.name)
+    } catch (agentError) {
       return NextResponse.json(
         {
           status: "error",
           message:
-            data?.message ??
-            "Impossible de supprimer le site.",
+            agentError instanceof Error
+              ? agentError.message
+              : "Impossible de supprimer le site.",
         },
-        {
-          status: response.status,
-        },
+        { status: 502 },
       )
     }
 
