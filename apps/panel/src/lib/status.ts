@@ -13,6 +13,9 @@ export function siteStatus(status: string): { label: string; tone: Tone } {
     case "deploying":
       return { label: "Déploiement…", tone: "warning" }
 
+    case "creating":
+      return { label: "Création…", tone: "warning" }
+
     case "restarting":
       return { label: "Redémarrage…", tone: "warning" }
 
