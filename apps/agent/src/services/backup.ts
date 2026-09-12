@@ -103,42 +103,28 @@ export function resolveBackupPath(
   return resolved
 }
 
-export async function createBackup(databaseName: string) {
-  const container = await getDatabaseContainer(
-    getContainerName(databaseName),
-  )
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
 
-  if (!container) {
-    throw new Error(
-      `Le container de la base "${databaseName}" est introuvable.`,
-    )
-  }
+/*
+ * Erreurs typiques d'un Postgres pas encore complètement démarré :
+ * l'entrypoint officiel fait tourner une instance temporaire pour les
+ * scripts d'init (accepte déjà des connexions, mais la base cible et
+ * son utilisateur ne sont pas encore créés), l'arrête, puis démarre
+ * l'instance finale — plusieurs secondes de fenêtres transitoires où
+ * `pg_dump` échoue pour des raisons purement temporelles, pas réelles.
+ */
+const TRANSIENT_ERROR_PATTERN =
+  /No such file or directory|does not exist|starting up|shutting down|Connection refused/i
 
-  const inspect = await container.inspect()
-
-  if (!inspect.State?.Running) {
-    throw new Error(
-      "La base doit être en ligne pour être sauvegardée.",
-    )
-  }
-
-  const env = parseContainerEnv(inspect.Config?.Env)
-  const username = env.POSTGRES_USER
-  const dbName = env.POSTGRES_DB
-  const password = env.POSTGRES_PASSWORD
-
-  if (!username || !dbName || !password) {
-    throw new Error(
-      "Configuration de la base introuvable sur le container.",
-    )
-  }
-
-  const dir = getBackupDir(databaseName)
-  await mkdir(dir, { recursive: true })
-
-  const filename = generateFilename()
-  const filePath = path.join(dir, filename)
-
+async function runPgDumpOnce(
+  container: Docker.Container,
+  username: string,
+  dbName: string,
+  password: string,
+  filePath: string,
+) {
   const exec = await container.exec({
     Cmd: ["pg_dump", "-U", username, "-d", dbName, "--no-owner"],
     Env: [`PGPASSWORD=${password}`],
@@ -191,6 +177,69 @@ export async function createBackup(databaseName: string) {
     throw new Error(
       `pg_dump a échoué${stderrText ? ` : ${stderrText}` : "."}`,
     )
+  }
+}
+
+export async function createBackup(databaseName: string) {
+  const container = await getDatabaseContainer(
+    getContainerName(databaseName),
+  )
+
+  if (!container) {
+    throw new Error(
+      `Le container de la base "${databaseName}" est introuvable.`,
+    )
+  }
+
+  const inspect = await container.inspect()
+
+  if (!inspect.State?.Running) {
+    throw new Error(
+      "La base doit être en ligne pour être sauvegardée.",
+    )
+  }
+
+  const env = parseContainerEnv(inspect.Config?.Env)
+  const username = env.POSTGRES_USER
+  const dbName = env.POSTGRES_DB
+  const password = env.POSTGRES_PASSWORD
+
+  if (!username || !dbName || !password) {
+    throw new Error(
+      "Configuration de la base introuvable sur le container.",
+    )
+  }
+
+  const dir = getBackupDir(databaseName)
+  await mkdir(dir, { recursive: true })
+
+  const filename = generateFilename()
+  const filePath = path.join(dir, filename)
+
+  /*
+   * Un container "Running" ne veut pas dire que la base cible est déjà
+   * utilisable (voir TRANSIENT_ERROR_PATTERN ci-dessus) : sur une base
+   * tout juste créée, `pg_dump` peut échouer plusieurs fois de suite
+   * avant que l'instance finale de Postgres soit prête. On retente
+   * uniquement sur ce type d'erreur précis, jusqu'à ~20s au total.
+   */
+  const maxAttempts = 20
+  const delayMs = 1000
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await runPgDumpOnce(container, username, dbName, password, filePath)
+      break
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      const transient = TRANSIENT_ERROR_PATTERN.test(message)
+
+      if (!transient || attempt === maxAttempts) {
+        throw error
+      }
+
+      await sleep(delayMs)
+    }
   }
 
   const stats = await stat(filePath)
