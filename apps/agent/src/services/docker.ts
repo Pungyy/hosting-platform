@@ -20,6 +20,26 @@ const DOCKER_LOG_CONFIG = {
   },
 }
 
+/*
+ * Empêche un container tenant de contourner un service Postgres/Agent
+ * lié à 127.0.0.1 sur l'hôte via le mécanisme "host.docker.internal"
+ * de Docker Desktop — vérifié empiriquement : Docker Desktop répond à
+ * ce nom via son résolveur DNS interne (une adresse ULA IPv6 propre à
+ * Docker Desktop) et relaie la connexion vers l'hôte Windows en tant
+ * que connexion loopback native, quel que soit le réseau du container
+ * et indépendamment du binding choisi côté hôte. Écrire nous-mêmes ces
+ * entrées dans /etc/hosts (consultées avant toute requête DNS, ordre
+ * NSS "files dns") neutralise cette résolution automatique : le nom
+ * boucle alors sur la loopback du container lui-même, sans jamais
+ * atteindre l'hôte. N'affecte aucune autre résolution DNS du
+ * container (vérifié : nom propre, DNS externe, sortie réseau
+ * inchangés).
+ */
+export const TENANT_CONTAINER_EXTRA_HOSTS = [
+  "host.docker.internal:127.0.0.1",
+  "host.docker.internal:::1",
+]
+
 export type CreateSiteInput = {
   name: string
   tenantId: string
@@ -290,6 +310,9 @@ export async function createSite({
 
         LogConfig:
           DOCKER_LOG_CONFIG,
+
+        ExtraHosts:
+          TENANT_CONTAINER_EXTRA_HOSTS,
       },
 
       NetworkingConfig: {
@@ -575,6 +598,9 @@ export async function createDeploymentContainer({
 
         LogConfig:
           DOCKER_LOG_CONFIG,
+
+        ExtraHosts:
+          TENANT_CONTAINER_EXTRA_HOSTS,
       },
 
       NetworkingConfig: {

@@ -40,7 +40,10 @@ vi.mock("dockerode", () => ({
   default: vi.fn().mockImplementation(() => mockDockerInstance),
 }))
 
-import { getTenantNetworkName } from "./docker.js"
+import {
+  getTenantNetworkName,
+  TENANT_CONTAINER_EXTRA_HOSTS,
+} from "./docker.js"
 import {
   createDatabase,
   migrateDatabaseToTenantNetwork,
@@ -103,6 +106,14 @@ describe("createDatabase — validation du tenantId avant tout appel Docker", ()
     expect(createContainerArgs.Labels["hosting.platform.tenant"]).toBe(
       TENANT_A,
     )
+
+    expect(createContainerArgs.HostConfig.ExtraHosts).toEqual(
+      TENANT_CONTAINER_EXTRA_HOSTS,
+    )
+    expect(createContainerArgs.HostConfig.ExtraHosts).toEqual([
+      "host.docker.internal:127.0.0.1",
+      "host.docker.internal:::1",
+    ])
   })
 })
 

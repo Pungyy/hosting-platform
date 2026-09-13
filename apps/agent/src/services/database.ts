@@ -7,6 +7,7 @@ import { deleteAllBackups } from "./backup.js"
 import {
   ensureNetwork,
   getTenantNetworkName,
+  TENANT_CONTAINER_EXTRA_HOSTS,
   validateTenantId,
 } from "./docker.js"
 
@@ -234,6 +235,8 @@ export async function createDatabase({
       AutoRemove: false,
 
       LogConfig: DOCKER_LOG_CONFIG,
+
+      ExtraHosts: TENANT_CONTAINER_EXTRA_HOSTS,
 
       Binds: [`${volumeName}:${engineConfig.dataPath}`],
     },

@@ -39,8 +39,10 @@ vi.mock("./traefik.js", () => ({
 
 import {
   createDeploymentContainer,
+  createSite,
   getTenantNetworkName,
   migrateSiteToTenantNetwork,
+  TENANT_CONTAINER_EXTRA_HOSTS,
   validateTenantId,
 } from "./docker.js"
 
@@ -257,5 +259,67 @@ describe("migrateSiteToTenantNetwork — idempotence", () => {
     )
 
     expect(mockNetwork.connect).not.toHaveBeenCalled()
+  })
+})
+
+describe("createSite — durcissement host.docker.internal", () => {
+  it("transmet TENANT_CONTAINER_EXTRA_HOSTS (127.0.0.1 et ::1) à docker.createContainer()", async () => {
+    mockDockerInstance.listContainers.mockResolvedValue([])
+    mockDockerInstance.listNetworks.mockResolvedValue([])
+    mockDockerInstance.createNetwork.mockResolvedValue({})
+    mockDockerInstance.createContainer.mockResolvedValue({
+      start: vi.fn().mockResolvedValue(undefined),
+      inspect: vi.fn().mockResolvedValue({
+        Id: "site-id",
+        State: { Status: "running", Running: true },
+      }),
+    })
+
+    await createSite({ name: "test-site", tenantId: TENANT_A })
+
+    expect(mockDockerInstance.createContainer).toHaveBeenCalledTimes(1)
+
+    const args =
+      mockDockerInstance.createContainer.mock.calls[0][0]
+
+    expect(args.HostConfig.ExtraHosts).toEqual(
+      TENANT_CONTAINER_EXTRA_HOSTS,
+    )
+    expect(args.HostConfig.ExtraHosts).toEqual([
+      "host.docker.internal:127.0.0.1",
+      "host.docker.internal:::1",
+    ])
+  })
+})
+
+describe("createDeploymentContainer — durcissement host.docker.internal", () => {
+  it("transmet TENANT_CONTAINER_EXTRA_HOSTS (127.0.0.1 et ::1) à docker.createContainer()", async () => {
+    mockDockerInstance.listContainers.mockResolvedValue([])
+    mockDockerInstance.listNetworks.mockResolvedValue([])
+    mockDockerInstance.createNetwork.mockResolvedValue({})
+    mockDockerInstance.getImage.mockReturnValue({
+      inspect: vi.fn().mockResolvedValue({
+        Config: { ExposedPorts: { "8080/tcp": {} } },
+      }),
+    })
+    mockDockerInstance.createContainer.mockResolvedValue({})
+
+    // Le flux continue après createContainer (start, inspect, etc.) —
+    // non mocké ici puisque seul l'appel createContainer nous
+    // intéresse pour ce test. On avale l'erreur qui en résultera.
+    await createDeploymentContainer({
+      siteName: "test-site",
+      imageName: "hosting/test-site:abc",
+      tenantId: TENANT_A,
+    }).catch(() => {})
+
+    expect(mockDockerInstance.createContainer).toHaveBeenCalledTimes(1)
+
+    const args =
+      mockDockerInstance.createContainer.mock.calls[0][0]
+
+    expect(args.HostConfig.ExtraHosts).toEqual(
+      TENANT_CONTAINER_EXTRA_HOSTS,
+    )
   })
 })
