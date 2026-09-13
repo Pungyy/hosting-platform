@@ -37,28 +37,37 @@ export async function requireAgentToken(
     )
   }
 
-  /*
-   * Le token permanent généré lors de
-   * l'enrôlement est prioritaire.
-   */
   const permanentToken =
     getAgentToken()
 
-  if (
-    permanentToken &&
-    token === permanentToken
-  ) {
-    await next()
-    return
+  /*
+   * Une fois l'Agent enrôlé (token permanent local présent), ce
+   * token devient la SEULE source de vérité : le token statique
+   * AGENT_TOKEN n'est plus accepté, même s'il correspond à la
+   * valeur configurée dans .env. Sans cette exclusivité, un
+   * AGENT_TOKEN compromis (valeur souvent partagée entre
+   * plusieurs agents en développement) resterait une porte
+   * d'accès permanente sur un agent déjà enrôlé.
+   */
+  if (permanentToken) {
+    if (token === permanentToken) {
+      await next()
+      return
+    }
+
+    return c.json(
+      {
+        status: "error",
+        message: "Token invalide",
+      },
+      401,
+    )
   }
 
   /*
-   * Fallback pour notre environnement
-   * de développement local.
-   *
-   * Il permet de continuer à utiliser
-   * AGENT_TOKEN tant que l'Agent n'est
-   * pas encore enrôlé.
+   * Pas encore enrôlé (aucun token permanent local) : AGENT_TOKEN
+   * ne sert que d'amorçage, ex. environnement de développement
+   * local avant tout enrôlement formel.
    */
   if (
     token === config.agentToken
