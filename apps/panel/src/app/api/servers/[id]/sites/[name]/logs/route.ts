@@ -1,7 +1,17 @@
 import { NextResponse } from "next/server"
-import { requireSession } from "@/lib/auth/guard"
-import { getAgentSiteLogs } from "@/lib/agent/client"
 
+import { requireSession } from "@/lib/auth/guard"
+import { requireAdmin } from "@/lib/auth/roles"
+import { getAgentSiteLogs } from "@/lib/agent/client"
+import { query } from "@/lib/database"
+import { getOwnedSite } from "@/lib/resources/sites"
+import { fetchSiteLogs } from "@/app/api/sites/[id]/logs/route"
+
+/*
+ * Route historique fusionnée avec le système d'autorisation de
+ * /api/sites/[id]/logs — cf. le commentaire équivalent dans
+ * .../action/route.ts pour le raisonnement complet.
+ */
 export async function GET(
   _request: Request,
   context: {
@@ -12,17 +22,68 @@ export async function GET(
   },
 ) {
   try {
-    const { response: authError } = await requireSession()
+    const { session, response: authError } = await requireSession()
     if (authError) return authError
 
-    const { id, name } = await context.params
+    const { id: serverId, name } = await context.params
 
-    const result = await getAgentSiteLogs(
-      id,
-      name,
+    const siteLookup = await query<{ id: string }>(
+      `
+        SELECT id
+        FROM sites
+        WHERE server_id = $1 AND name = $2
+        LIMIT 1
+      `,
+      [serverId, name],
     )
 
-    return NextResponse.json(result)
+    const siteId = siteLookup.rows[0]?.id
+
+    if (siteId) {
+      const { site, response: ownedError } = await getOwnedSite(
+        siteId,
+        session,
+      )
+      if (ownedError) return ownedError
+
+      try {
+        const logs = await fetchSiteLogs(site)
+        return NextResponse.json({ status: "ok", logs })
+      } catch (agentError) {
+        return NextResponse.json(
+          {
+            status: "error",
+            message:
+              agentError instanceof Error
+                ? agentError.message
+                : "Impossible de récupérer les logs.",
+          },
+          { status: 502 },
+        )
+      }
+    }
+
+    /*
+     * Container orphelin : réservé aux admins.
+     */
+    const { response: roleError } = requireAdmin(session)
+    if (roleError) return roleError
+
+    try {
+      const result = await getAgentSiteLogs(serverId, name)
+      return NextResponse.json(result)
+    } catch (agentError) {
+      return NextResponse.json(
+        {
+          status: "error",
+          message:
+            agentError instanceof Error
+              ? agentError.message
+              : "Impossible de récupérer les logs.",
+        },
+        { status: 502 },
+      )
+    }
   } catch (error) {
     console.error(
       "GET /api/servers/[id]/sites/[name]/logs error:",

@@ -3,6 +3,7 @@ import { NextResponse } from "next/server"
 import { requireSession } from "@/lib/auth/guard"
 import { agentDatabaseAction } from "@/lib/agent/client"
 import { query } from "@/lib/database"
+import { getOwnedDatabase } from "@/lib/resources/databases"
 
 type RouteContext = {
   params: Promise<{
@@ -29,7 +30,7 @@ export async function POST(
   { params }: RouteContext,
 ) {
   try {
-    const { response: authError } = await requireSession()
+    const { session, response: authError } = await requireSession()
     if (authError) return authError
 
     const { id } = await params
@@ -48,31 +49,11 @@ export async function POST(
       )
     }
 
-    const result = await query<{
-      id: string
-      name: string
-      server_id: string
-    }>(
-      `
-        SELECT id, name, server_id
-        FROM databases
-        WHERE id = $1
-        LIMIT 1
-      `,
-      [id],
+    const { database, response: ownedError } = await getOwnedDatabase(
+      id,
+      session,
     )
-
-    if (result.rows.length === 0) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message: "Base de données introuvable.",
-        },
-        { status: 404 },
-      )
-    }
-
-    const database = result.rows[0]
+    if (ownedError) return ownedError
 
     let data: AgentActionResult
 

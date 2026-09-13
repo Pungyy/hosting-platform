@@ -3,6 +3,7 @@ import { NextResponse } from "next/server"
 import { requireSession } from "@/lib/auth/guard"
 import { updateAgentSiteDomains } from "@/lib/agent/client"
 import { query } from "@/lib/database"
+import { getOwnedSite } from "@/lib/resources/sites"
 
 type RouteContext = {
   params: Promise<{
@@ -19,12 +20,6 @@ type DomainRow = {
   ssl_enabled: boolean
   created_at: string
   updated_at: string
-}
-
-type SiteRow = {
-  id: string
-  name: string
-  server_id: string
 }
 
 type UpdateDomainBody = {
@@ -48,26 +43,6 @@ async function syncDomainsWithAgent(
     site.name,
     domains,
   )
-}
-
-async function getSite(
-  siteId: string,
-) {
-  const result =
-    await query<SiteRow>(
-      `
-        SELECT
-          id,
-          name,
-          server_id
-        FROM sites
-        WHERE id = $1
-        LIMIT 1
-      `,
-      [siteId],
-    )
-
-  return result.rows[0] ?? null
 }
 
 async function getSiteDomains(
@@ -138,7 +113,7 @@ export async function PATCH(
   { params }: RouteContext,
 ) {
   try {
-    const { response: authError } = await requireSession()
+    const { session, response: authError } = await requireSession()
     if (authError) return authError
 
     const {
@@ -146,21 +121,8 @@ export async function PATCH(
       domainId,
     } = await params
 
-    const site =
-      await getSite(id)
-
-    if (!site) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message:
-            "Site introuvable.",
-        },
-        {
-          status: 404,
-        },
-      )
-    }
+    const { site, response: ownedError } = await getOwnedSite(id, session)
+    if (ownedError) return ownedError
 
     const domainResult =
       await query<DomainRow>(
@@ -515,7 +477,7 @@ export async function DELETE(
   { params }: RouteContext,
 ) {
   try {
-    const { response: authError } = await requireSession()
+    const { session, response: authError } = await requireSession()
     if (authError) return authError
 
     const {
@@ -523,21 +485,8 @@ export async function DELETE(
       domainId,
     } = await params
 
-    const site =
-      await getSite(id)
-
-    if (!site) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message:
-            "Site introuvable.",
-        },
-        {
-          status: 404,
-        },
-      )
-    }
+    const { site, response: ownedError } = await getOwnedSite(id, session)
+    if (ownedError) return ownedError
 
     const domainResult =
       await query<DomainRow>(

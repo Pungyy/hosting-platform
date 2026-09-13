@@ -5,6 +5,21 @@ import { SESSION_COOKIE_NAME } from "@/lib/auth/cookie"
 
 export { SESSION_COOKIE_NAME }
 
+/*
+ * Forme d'une session résolue (jointure sessions ⋈ users). Extrait ici en
+ * type nommé, réutilisé par lib/auth/roles.ts et lib/resources/* — aucun
+ * changement de comportement, getSession()/getCurrentSession() renvoyaient
+ * déjà exactement cette forme.
+ */
+export type Session = {
+  session_id: string
+  user_id: string
+  email: string
+  name: string
+  role: "user" | "admin"
+  expires_at: string
+}
+
 const SESSION_DURATION_MS =
   7 * 24 * 60 * 60 * 1000
 
@@ -60,14 +75,7 @@ export async function getSession(
     hashSessionToken(token)
 
   const result =
-    await query<{
-      session_id: string
-      user_id: string
-      email: string
-      name: string
-      role: "user" | "admin"
-      expires_at: string
-    }>(
+    await query<Session>(
       `
         SELECT
           sessions.id AS session_id,

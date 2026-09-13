@@ -2,7 +2,7 @@ import { NextResponse } from "next/server"
 
 import { requireSession } from "@/lib/auth/guard"
 import { getAgentSiteLogs } from "@/lib/agent/client"
-import { query } from "@/lib/database"
+import { getOwnedSite, type OwnedSite } from "@/lib/resources/sites"
 
 type RouteContext = {
   params: Promise<{
@@ -10,51 +10,37 @@ type RouteContext = {
   }>
 }
 
+/*
+ * Récupère les logs d'un site déjà résolu et autorisé. Partagée par cette
+ * route et par la route fusionnée /api/servers/[id]/sites/[name]/logs —
+ * cf. performSiteAction dans action/route.ts pour le même principe.
+ */
+export async function fetchSiteLogs(
+  site: Pick<OwnedSite, "name" | "server_id">,
+) {
+  const data = await getAgentSiteLogs(site.server_id, site.name)
+  return data.logs ?? ""
+}
+
 export async function GET(
   _request: Request,
   { params }: RouteContext,
 ) {
   try {
-    const { response: authError } = await requireSession()
+    const { session, response: authError } = await requireSession()
     if (authError) return authError
 
     const { id } = await params
 
-    const result = await query<{
-      id: string
-      name: string
-      server_id: string
-    }>(
-      `
-        SELECT id, name, server_id
-        FROM sites
-        WHERE id = $1
-        LIMIT 1
-      `,
-      [id],
-    )
-
-    if (result.rows.length === 0) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message: "Site introuvable.",
-        },
-        { status: 404 },
-      )
-    }
-
-    const site = result.rows[0]
+    const { site, response: ownedError } = await getOwnedSite(id, session)
+    if (ownedError) return ownedError
 
     try {
-      const data = await getAgentSiteLogs(
-        site.server_id,
-        site.name,
-      )
+      const logs = await fetchSiteLogs(site)
 
       return NextResponse.json({
         status: "ok",
-        logs: data.logs ?? "",
+        logs,
       })
     } catch (agentError) {
       /*

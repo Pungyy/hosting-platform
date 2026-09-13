@@ -4,6 +4,7 @@ import { z } from "zod"
 import { requireSession } from "@/lib/auth/guard"
 import { deleteAgentSite } from "@/lib/agent/client"
 import { query } from "@/lib/database"
+import { getOwnedSite } from "@/lib/resources/sites"
 
 type RouteContext = {
   params: Promise<{
@@ -55,50 +56,17 @@ export async function GET(
   { params }: RouteContext,
 ) {
   try {
-    const { response: authError } = await requireSession()
+    const { session, response: authError } = await requireSession()
     if (authError) return authError
 
     const { id } = await params
 
-    const result = await query(
-      `
-        SELECT
-          s.id,
-          s.name,
-          s.container_name,
-          s.container_id,
-          s.image,
-          s.status,
-          s.created_at,
-          s.server_id,
-          s.repository_url,
-          s.repository_branch,
-          srv.name AS server_name,
-          srv.hostname AS server_hostname
-        FROM sites s
-        LEFT JOIN servers srv
-          ON srv.id = s.server_id
-        WHERE s.id = $1
-        LIMIT 1
-      `,
-      [id],
-    )
-
-    if (result.rows.length === 0) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message: "Site introuvable.",
-        },
-        {
-          status: 404,
-        },
-      )
-    }
+    const { site, response: ownedError } = await getOwnedSite(id, session)
+    if (ownedError) return ownedError
 
     return NextResponse.json({
       status: "ok",
-      site: result.rows[0],
+      site,
     })
   } catch (error) {
     console.error(
@@ -130,10 +98,16 @@ export async function PATCH(
   { params }: RouteContext,
 ) {
   try {
-    const { response: authError } = await requireSession()
+    const { session, response: authError } = await requireSession()
     if (authError) return authError
 
     const { id } = await params
+
+    const { site: current, response: ownedError } = await getOwnedSite(
+      id,
+      session,
+    )
+    if (ownedError) return ownedError
 
     const body = await request.json().catch(() => null)
 
@@ -151,33 +125,6 @@ export async function PATCH(
         { status: 400 },
       )
     }
-
-    const currentResult = await query<{
-      repository_url: string | null
-      repository_branch: string | null
-    }>(
-      `
-        SELECT
-          repository_url,
-          repository_branch
-        FROM sites
-        WHERE id = $1
-        LIMIT 1
-      `,
-      [id],
-    )
-
-    if (currentResult.rows.length === 0) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message: "Site introuvable.",
-        },
-        { status: 404 },
-      )
-    }
-
-    const current = currentResult.rows[0]
 
     const nextUrl =
       parsed.data.repositoryUrl === undefined
@@ -244,39 +191,13 @@ export async function DELETE(
   { params }: RouteContext,
 ) {
   try {
-    const { response: authError } = await requireSession()
+    const { session, response: authError } = await requireSession()
     if (authError) return authError
 
     const { id } = await params
 
-    const result = await query<{
-      id: string
-      name: string
-      server_id: string
-    }>(
-      `
-        SELECT id, name, server_id
-        FROM sites
-        WHERE id = $1
-        LIMIT 1
-      `,
-      [id],
-    )
-
-    if (result.rows.length === 0) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message: "Site introuvable.",
-        },
-        {
-          status: 404,
-        },
-      )
-    }
-
-    const site =
-      result.rows[0]
+    const { site, response: ownedError } = await getOwnedSite(id, session)
+    if (ownedError) return ownedError
 
     try {
       await deleteAgentSite(site.server_id, site.name)

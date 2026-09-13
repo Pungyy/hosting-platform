@@ -72,7 +72,7 @@ export async function POST(
   },
 ) {
   try {
-    const { response: authError } = await requireSession()
+    const { session, response: authError } = await requireSession()
     if (authError) return authError
 
     const { id: serverId } = await context.params
@@ -192,33 +192,7 @@ export async function POST(
       )
     }
 
-    /*
-     * Pour l'instant, on utilise
-     * le premier utilisateur de la base.
-     *
-     * On remplacera ça par l'utilisateur
-     * connecté quand on fera les permissions.
-     */
-    const userResult = await query<{ id: string }>(
-      `
-        SELECT id
-        FROM users
-        ORDER BY created_at ASC
-        LIMIT 1
-      `,
-    )
-
-    if (userResult.rows.length === 0) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message: "Aucun utilisateur disponible.",
-        },
-        { status: 500 },
-      )
-    }
-
-    const userId = userResult.rows[0].id
+    const userId = session.user_id
 
     /*
      * Enregistrement du site

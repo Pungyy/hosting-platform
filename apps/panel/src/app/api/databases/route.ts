@@ -2,6 +2,7 @@ import { NextResponse } from "next/server"
 import { z } from "zod"
 
 import { requireSession } from "@/lib/auth/guard"
+import { resolveListScope } from "@/lib/auth/roles"
 import {
   createAgentDatabase,
   deleteAgentDatabase,
@@ -62,29 +63,36 @@ const RECENT_HEARTBEAT_MS = 2 * 60 * 1000
  * Bases PostgreSQL du Panel + synchronisation de leur statut Docker,
  * en interrogeant l'Agent de CHAQUE serveur concerné.
  */
-export async function GET() {
+export async function GET(request: Request) {
   try {
-    const { response: authError } = await requireSession()
+    const { session, response: authError } = await requireSession()
     if (authError) return authError
 
-    const databasesResult = await query<DatabaseRow>(`
-      SELECT
-        id,
-        name,
-        engine,
-        container_name,
-        container_id,
-        image,
-        status,
-        database_name,
-        username,
-        internal_host,
-        internal_port,
-        created_at,
-        server_id
-      FROM databases
-      ORDER BY created_at DESC
-    `)
+    const scopeResult = resolveListScope(request, session)
+    if (scopeResult.response) return scopeResult.response
+
+    const databasesResult = await query<DatabaseRow>(
+      `
+        SELECT
+          id,
+          name,
+          engine,
+          container_name,
+          container_id,
+          image,
+          status,
+          database_name,
+          username,
+          internal_host,
+          internal_port,
+          created_at,
+          server_id
+        FROM databases
+        ${scopeResult.scope === "own" ? "WHERE user_id = $1" : ""}
+        ORDER BY created_at DESC
+      `,
+      scopeResult.scope === "own" ? [session.user_id] : [],
+    )
 
     const databases = databasesResult.rows
 

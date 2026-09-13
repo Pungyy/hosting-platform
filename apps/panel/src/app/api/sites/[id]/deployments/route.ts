@@ -2,6 +2,7 @@ import { NextResponse } from "next/server"
 
 import { requireSession } from "@/lib/auth/guard"
 import { query } from "@/lib/database"
+import { getOwnedSite } from "@/lib/resources/sites"
 
 type RouteContext = {
   params: Promise<{
@@ -30,35 +31,13 @@ export async function GET(
   { params }: RouteContext,
 ) {
   try {
-    const { response: authError } = await requireSession()
+    const { session, response: authError } = await requireSession()
     if (authError) return authError
 
     const { id } = await params
 
-    const siteResult =
-      await query<{ id: string }>(
-        `
-          SELECT id
-          FROM sites
-          WHERE id = $1
-          LIMIT 1
-        `,
-        [id],
-      )
-
-    if (
-      siteResult.rows.length === 0
-    ) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message: "Site introuvable.",
-        },
-        {
-          status: 404,
-        },
-      )
-    }
+    const { response: ownedError } = await getOwnedSite(id, session)
+    if (ownedError) return ownedError
 
     const deploymentsResult =
       await query<DeploymentRow>(

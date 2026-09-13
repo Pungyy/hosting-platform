@@ -3,17 +3,12 @@ import { NextResponse } from "next/server"
 import { requireSession } from "@/lib/auth/guard"
 import { createAgentDatabaseBackup } from "@/lib/agent/client"
 import { query } from "@/lib/database"
+import { getOwnedDatabase } from "@/lib/resources/databases"
 
 type RouteContext = {
   params: Promise<{
     id: string
   }>
-}
-
-type DatabaseConfig = {
-  id: string
-  name: string
-  server_id: string
 }
 
 type BackupRow = {
@@ -37,10 +32,13 @@ export async function GET(
   { params }: RouteContext,
 ) {
   try {
-    const { response: authError } = await requireSession()
+    const { session, response: authError } = await requireSession()
     if (authError) return authError
 
     const { id } = await params
+
+    const { response: ownedError } = await getOwnedDatabase(id, session)
+    if (ownedError) return ownedError
 
     const result = await query<BackupRow>(
       `
@@ -92,32 +90,16 @@ export async function POST(
   let backupId: string | null = null
 
   try {
-    const { response: authError } = await requireSession()
+    const { session, response: authError } = await requireSession()
     if (authError) return authError
 
     const { id } = await params
 
-    const databaseResult = await query<DatabaseConfig>(
-      `
-        SELECT id, name, server_id
-        FROM databases
-        WHERE id = $1
-        LIMIT 1
-      `,
-      [id],
+    const { database, response: ownedError } = await getOwnedDatabase(
+      id,
+      session,
     )
-
-    if (databaseResult.rows.length === 0) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message: "Base de données introuvable.",
-        },
-        { status: 404 },
-      )
-    }
-
-    const database = databaseResult.rows[0]
+    if (ownedError) return ownedError
 
     const insertResult = await query<{ id: string }>(
       `

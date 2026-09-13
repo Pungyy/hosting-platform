@@ -2,6 +2,7 @@ import { NextResponse } from "next/server"
 import { z } from "zod"
 
 import { requireSession } from "@/lib/auth/guard"
+import { requireAdmin } from "@/lib/auth/roles"
 import { query } from "@/lib/database"
 
 const createServerSchema = z.object({
@@ -204,8 +205,11 @@ export async function POST(
   request: Request,
 ) {
   try {
-    const { response: authError } = await requireSession()
+    const { session, response: authError } = await requireSession()
     if (authError) return authError
+
+    const { response: roleError } = requireAdmin(session)
+    if (roleError) return roleError
 
     const body =
       await request.json()

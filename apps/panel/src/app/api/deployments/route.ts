@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server"
 
 import { requireSession } from "@/lib/auth/guard"
+import { resolveListScope } from "@/lib/auth/roles"
 import { query } from "@/lib/database"
 
 const MAX_DEPLOYMENTS = 100
@@ -8,14 +9,23 @@ const MAX_DEPLOYMENTS = 100
 /*
  * GET /api/deployments
  *
- * Historique global des déploiements, tous sites confondus.
- * Déclencher un déploiement reste une action par site
+ * Historique des déploiements — par défaut ceux des sites de
+ * l'utilisateur courant, ou de tous les tenants pour un admin avec
+ * ?scope=all. Déclencher un déploiement reste une action par site
  * (/api/sites/[id]/deploy) — cette route est en lecture seule.
  */
-export async function GET() {
+export async function GET(request: Request) {
   try {
-    const { response: authError } = await requireSession()
+    const { session, response: authError } = await requireSession()
     if (authError) return authError
+
+    const scopeResult = resolveListScope(request, session)
+    if (scopeResult.response) return scopeResult.response
+
+    const params =
+      scopeResult.scope === "own"
+        ? [session.user_id, MAX_DEPLOYMENTS]
+        : [MAX_DEPLOYMENTS]
 
     const result = await query<{
       id: string
@@ -46,10 +56,11 @@ export async function GET() {
         FROM deployments dep
         INNER JOIN sites s
           ON s.id = dep.site_id
+        ${scopeResult.scope === "own" ? "WHERE s.user_id = $1" : ""}
         ORDER BY dep.created_at DESC
-        LIMIT $1
+        LIMIT $${scopeResult.scope === "own" ? "2" : "1"}
       `,
-      [MAX_DEPLOYMENTS],
+      params,
     )
 
     return NextResponse.json({

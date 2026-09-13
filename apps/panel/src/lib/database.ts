@@ -15,6 +15,20 @@ export async function query<T extends QueryResultRow = QueryResultRow>(
   return pool.query<T>(text, values)
 }
 
+/*
+ * Contrat minimal partagé par le pool de production (`query` ci-dessus) et
+ * le client de transaction utilisé par les tests d'intégration
+ * (apps/panel/src/test/withTestTransaction.ts) — permet aux chargeurs de
+ * lib/resources/* d'accepter en option une source de requêtes différente
+ * sans dépendre directement du pool applicatif.
+ */
+export type Queryer = {
+  query<T extends QueryResultRow = QueryResultRow>(
+    text: string,
+    values?: unknown[],
+  ): Promise<{ rows: T[] }>
+}
+
 export async function checkDatabaseConnection() {
   const result = await pool.query("SELECT NOW()")
 

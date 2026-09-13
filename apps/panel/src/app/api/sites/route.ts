@@ -2,6 +2,7 @@ import { NextResponse } from "next/server"
 import { z } from "zod"
 
 import { requireSession } from "@/lib/auth/guard"
+import { resolveListScope } from "@/lib/auth/roles"
 import {
   createAgentSite,
   deleteAgentSite,
@@ -62,24 +63,31 @@ const RECENT_HEARTBEAT_MS = 2 * 60 * 1000
  * Sites PostgreSQL + synchronisation de leur statut avec Docker,
  * en interrogeant l'Agent de CHAQUE serveur (pas seulement le local).
  */
-export async function GET() {
+export async function GET(request: Request) {
   try {
-    const { response: authError } = await requireSession()
+    const { session, response: authError } = await requireSession()
     if (authError) return authError
 
-    const sitesResult = await query<SiteRow>(`
-      SELECT
-        s.id,
-        s.name,
-        s.container_name,
-        s.container_id,
-        s.image,
-        s.status,
-        s.created_at,
-        s.server_id
-      FROM sites s
-      ORDER BY s.created_at DESC
-    `)
+    const scopeResult = resolveListScope(request, session)
+    if (scopeResult.response) return scopeResult.response
+
+    const sitesResult = await query<SiteRow>(
+      `
+        SELECT
+          s.id,
+          s.name,
+          s.container_name,
+          s.container_id,
+          s.image,
+          s.status,
+          s.created_at,
+          s.server_id
+        FROM sites s
+        ${scopeResult.scope === "own" ? "WHERE s.user_id = $1" : ""}
+        ORDER BY s.created_at DESC
+      `,
+      scopeResult.scope === "own" ? [session.user_id] : [],
+    )
 
     const sites = sitesResult.rows
 
@@ -237,7 +245,7 @@ export async function GET() {
  */
 export async function POST(request: Request) {
   try {
-    const { response: authError } = await requireSession()
+    const { session, response: authError } = await requireSession()
     if (authError) return authError
 
     const body = await request.json().catch(() => null)
@@ -335,26 +343,7 @@ export async function POST(request: Request) {
       )
     }
 
-    /*
-     * Utilisateur propriétaire : le premier de la base pour
-     * l'instant (à remplacer par l'utilisateur connecté quand
-     * les permissions seront en place).
-     */
-    const userResult = await query<{ id: string }>(
-      `SELECT id FROM users ORDER BY created_at ASC LIMIT 1`,
-    )
-
-    if (userResult.rows.length === 0) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message: "Aucun utilisateur disponible.",
-        },
-        { status: 500 },
-      )
-    }
-
-    const userId = userResult.rows[0].id
+    const userId = session.user_id
 
     try {
       const siteResult = await query<SiteRow>(

@@ -3,6 +3,7 @@ import { NextResponse } from "next/server"
 import { requireSession } from "@/lib/auth/guard"
 import { updateAgentSiteDomains } from "@/lib/agent/client"
 import { query } from "@/lib/database"
+import { getOwnedSite } from "@/lib/resources/sites"
 
 type RouteContext = {
   params: Promise<{
@@ -44,30 +45,6 @@ async function syncDomainsWithAgent(
     site.name,
     domains,
   )
-}
-
-async function getSite(
-  id: string,
-) {
-  const result =
-    await query<{
-      id: string
-      name: string
-      server_id: string
-    }>(
-      `
-        SELECT
-          id,
-          name,
-          server_id
-        FROM sites
-        WHERE id = $1
-        LIMIT 1
-      `,
-      [id],
-    )
-
-  return result.rows[0] ?? null
 }
 
 async function getSiteDomains(
@@ -112,27 +89,14 @@ export async function GET(
   { params }: RouteContext,
 ) {
   try {
-    const { response: authError } = await requireSession()
+    const { session, response: authError } = await requireSession()
     if (authError) return authError
 
     const { id } =
       await params
 
-    const site =
-      await getSite(id)
-
-    if (!site) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message:
-            "Site introuvable.",
-        },
-        {
-          status: 404,
-        },
-      )
-    }
+    const { response: ownedError } = await getOwnedSite(id, session)
+    if (ownedError) return ownedError
 
     const domainsResult =
       await query<DomainRow>(
@@ -191,27 +155,14 @@ export async function POST(
   { params }: RouteContext,
 ) {
   try {
-    const { response: authError } = await requireSession()
+    const { session, response: authError } = await requireSession()
     if (authError) return authError
 
     const { id } =
       await params
 
-    const site =
-      await getSite(id)
-
-    if (!site) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message:
-            "Site introuvable.",
-        },
-        {
-          status: 404,
-        },
-      )
-    }
+    const { site, response: ownedError } = await getOwnedSite(id, session)
+    if (ownedError) return ownedError
 
     const body =
       await request

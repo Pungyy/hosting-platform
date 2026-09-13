@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server"
 import { requireSession } from "@/lib/auth/guard"
+import { requireAdmin } from "@/lib/auth/roles"
 import { getAgentDockerInfo } from "@/lib/agent/client"
 
 export async function GET(
@@ -9,8 +10,11 @@ export async function GET(
   },
 ) {
   try {
-    const { response: authError } = await requireSession()
+    const { session, response: authError } = await requireSession()
     if (authError) return authError
+
+    const { response: roleError } = requireAdmin(session)
+    if (roleError) return roleError
 
     const { id } = await context.params
 

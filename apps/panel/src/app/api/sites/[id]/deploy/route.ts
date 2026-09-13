@@ -3,20 +3,12 @@ import { NextResponse } from "next/server"
 import { deployAgentSite } from "@/lib/agent/client"
 import { requireSession } from "@/lib/auth/guard"
 import { query } from "@/lib/database"
+import { getOwnedSite } from "@/lib/resources/sites"
 
 type RouteContext = {
   params: Promise<{
     id: string
   }>
-}
-
-type SiteDeploymentConfig = {
-  id: string
-  name: string
-  server_id: string
-  repository_url: string | null
-  repository_branch: string | null
-  build_path: string | null
 }
 
 type DeploymentResponse = {
@@ -46,45 +38,13 @@ export async function POST(
   let deploymentId: string | null = null
 
   try {
-    const { response: authError } = await requireSession()
+    const { session, response: authError } = await requireSession()
     if (authError) return authError
 
     const { id } = await params
 
-    /*
-     * Récupération de la configuration du site.
-     */
-    const siteResult =
-      await query<SiteDeploymentConfig>(
-        `
-          SELECT
-            id,
-            name,
-            server_id,
-            repository_url,
-            repository_branch,
-            build_path
-          FROM sites
-          WHERE id = $1
-          LIMIT 1
-        `,
-        [id],
-      )
-
-    if (siteResult.rows.length === 0) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message: "Site introuvable.",
-        },
-        {
-          status: 404,
-        },
-      )
-    }
-
-    const site =
-      siteResult.rows[0]
+    const { site, response: ownedError } = await getOwnedSite(id, session)
+    if (ownedError) return ownedError
 
     /*
      * Vérification de la configuration GitHub.

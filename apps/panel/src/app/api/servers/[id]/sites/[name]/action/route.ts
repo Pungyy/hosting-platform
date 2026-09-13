@@ -1,15 +1,28 @@
 import { NextResponse } from "next/server"
+
 import { requireSession } from "@/lib/auth/guard"
+import { requireAdmin } from "@/lib/auth/roles"
 import { agentSiteAction } from "@/lib/agent/client"
+import { query } from "@/lib/database"
+import { getOwnedSite } from "@/lib/resources/sites"
+import {
+  ALLOWED_SITE_ACTIONS,
+  performSiteAction,
+  type SiteAction,
+} from "@/app/api/sites/[id]/action/route"
 
-const allowedActions = [
-  "start",
-  "stop",
-  "restart",
-] as const
-
-type SiteAction = (typeof allowedActions)[number]
-
+/*
+ * Route historique, appelée par l'onglet Docker de la page serveur
+ * (qui identifie un container par son nom plutôt que par l'id du site).
+ * Fusionnée avec le système d'autorisation de /api/sites/[id]/action —
+ * un seul chemin d'autorisation, pas deux : si le nom correspond à un
+ * site suivi en base, on applique exactement la même vérification de
+ * propriétaire (getOwnedSite) et la même exécution (performSiteAction)
+ * que la route moderne. Les containers orphelins (aucune ligne `sites`
+ * correspondante, gérés uniquement depuis l'onglet Docker) restent
+ * accessibles, mais réservés aux admins — cf. décision produit "Docker
+ * sur la page serveur = admin uniquement".
+ */
 export async function POST(
   request: Request,
   context: {
@@ -20,23 +33,15 @@ export async function POST(
   },
 ) {
   try {
-    const { response: authError } = await requireSession()
+    const { session, response: authError } = await requireSession()
     if (authError) return authError
 
-    const { id, name } = await context.params
+    const { id: serverId, name } = await context.params
 
-    const body = await request
-      .json()
-      .catch(() => null)
+    const body = await request.json().catch(() => null)
+    const action = body?.action as SiteAction
 
-    const action = body?.action
-
-    if (
-      typeof action !== "string" ||
-      !allowedActions.includes(
-        action as SiteAction,
-      )
-    ) {
+    if (!ALLOWED_SITE_ACTIONS.includes(action)) {
       return NextResponse.json(
         {
           status: "error",
@@ -47,13 +52,71 @@ export async function POST(
       )
     }
 
-    const result = await agentSiteAction(
-      id,
-      name,
-      action,
+    const siteLookup = await query<{ id: string }>(
+      `
+        SELECT id
+        FROM sites
+        WHERE server_id = $1 AND name = $2
+        LIMIT 1
+      `,
+      [serverId, name],
     )
 
-    return NextResponse.json(result)
+    const siteId = siteLookup.rows[0]?.id
+
+    if (siteId) {
+      const { site, response: ownedError } = await getOwnedSite(
+        siteId,
+        session,
+      )
+      if (ownedError) return ownedError
+
+      try {
+        const { status: siteStatus, ...result } = await performSiteAction(
+          site,
+          action,
+        )
+        return NextResponse.json({
+          status: "ok",
+          ...result,
+          site: { ...site, status: siteStatus },
+        })
+      } catch (agentError) {
+        return NextResponse.json(
+          {
+            status: "error",
+            message:
+              agentError instanceof Error
+                ? agentError.message
+                : "Impossible d'exécuter l'action.",
+          },
+          { status: 502 },
+        )
+      }
+    }
+
+    /*
+     * Container orphelin : pas de propriétaire à vérifier, donc
+     * réservé aux admins.
+     */
+    const { response: roleError } = requireAdmin(session)
+    if (roleError) return roleError
+
+    try {
+      const result = await agentSiteAction(serverId, name, action)
+      return NextResponse.json(result)
+    } catch (agentError) {
+      return NextResponse.json(
+        {
+          status: "error",
+          message:
+            agentError instanceof Error
+              ? agentError.message
+              : "Impossible d'exécuter l'action.",
+        },
+        { status: 502 },
+      )
+    }
   } catch (error) {
     console.error(
       "POST /api/servers/[id]/sites/[name]/action error:",

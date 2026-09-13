@@ -3,6 +3,7 @@ import { NextResponse } from "next/server"
 import { requireSession } from "@/lib/auth/guard"
 import { agentSiteAction } from "@/lib/agent/client"
 import { query } from "@/lib/database"
+import { getOwnedSite, type OwnedSite } from "@/lib/resources/sites"
 
 type RouteContext = {
   params: Promise<{
@@ -10,9 +11,9 @@ type RouteContext = {
   }>
 }
 
-const ALLOWED_ACTIONS = ["start", "stop", "restart"] as const
+export const ALLOWED_SITE_ACTIONS = ["start", "stop", "restart"] as const
 
-type Action = (typeof ALLOWED_ACTIONS)[number]
+export type SiteAction = (typeof ALLOWED_SITE_ACTIONS)[number]
 
 type AgentActionResult = {
   status?: string
@@ -24,21 +25,59 @@ type AgentActionResult = {
   }
 }
 
+/*
+ * Exécute une action sur un site déjà résolu et autorisé (par getOwnedSite
+ * ou, pour les routes serveur fusionnées, par la même logique). Partagée
+ * par cette route et par la route fusionnée
+ * /api/servers/[id]/sites/[name]/action — un seul chemin de code pour
+ * "agir sur le container d'un site", quelle que soit l'URL d'entrée.
+ */
+export async function performSiteAction(
+  site: Pick<OwnedSite, "id" | "name" | "server_id">,
+  action: SiteAction,
+) {
+  const data = (await agentSiteAction(
+    site.server_id,
+    site.name,
+    action,
+  )) as AgentActionResult
+
+  const dbStatus = data.site?.running ? "online" : "stopped"
+
+  await query(
+    `
+      UPDATE sites
+      SET
+        status = $1,
+        container_id = COALESCE($2, container_id)
+      WHERE id = $3
+    `,
+    [dbStatus, data.site?.containerId ?? null, site.id],
+  )
+
+  return {
+    action,
+    docker_status: data.site?.status ?? "unknown",
+    status: dbStatus,
+    containerId: data.site?.containerId ?? null,
+  }
+}
+
 export async function POST(
   request: Request,
   { params }: RouteContext,
 ) {
   try {
-    const { response: authError } = await requireSession()
+    const { session, response: authError } = await requireSession()
     if (authError) return authError
 
     const { id } = await params
 
     const body = await request.json().catch(() => null)
 
-    const action = body?.action as Action
+    const action = body?.action as SiteAction
 
-    if (!ALLOWED_ACTIONS.includes(action)) {
+    if (!ALLOWED_SITE_ACTIONS.includes(action)) {
       return NextResponse.json(
         {
           status: "error",
@@ -48,41 +87,13 @@ export async function POST(
       )
     }
 
-    const siteResult = await query<{
-      id: string
-      name: string
-      container_name: string
-      server_id: string
-    }>(
-      `
-        SELECT id, name, container_name, server_id
-        FROM sites
-        WHERE id = $1
-        LIMIT 1
-      `,
-      [id],
-    )
+    const { site, response: ownedError } = await getOwnedSite(id, session)
+    if (ownedError) return ownedError
 
-    if (siteResult.rows.length === 0) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message: "Site introuvable.",
-        },
-        { status: 404 },
-      )
-    }
-
-    const site = siteResult.rows[0]
-
-    let data: AgentActionResult
+    let result: Awaited<ReturnType<typeof performSiteAction>>
 
     try {
-      data = (await agentSiteAction(
-        site.server_id,
-        site.name,
-        action,
-      )) as AgentActionResult
+      result = await performSiteAction(site, action)
     } catch (agentError) {
       return NextResponse.json(
         {
@@ -96,27 +107,14 @@ export async function POST(
       )
     }
 
-    const dbStatus = data.site?.running ? "online" : "stopped"
-
-    await query(
-      `
-        UPDATE sites
-        SET
-          status = $1,
-          container_id = COALESCE($2, container_id)
-        WHERE id = $3
-      `,
-      [dbStatus, data.site?.containerId ?? null, id],
-    )
-
     return NextResponse.json({
       status: "ok",
-      action,
-      docker_status: data.site?.status ?? "unknown",
+      action: result.action,
+      docker_status: result.docker_status,
       site: {
         ...site,
-        status: dbStatus,
-        container_id: data.site?.containerId ?? null,
+        status: result.status,
+        container_id: result.containerId,
       },
     })
   } catch (error) {

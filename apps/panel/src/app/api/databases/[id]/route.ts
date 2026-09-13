@@ -4,6 +4,7 @@ import { requireSession } from "@/lib/auth/guard"
 import { deleteAgentDatabase } from "@/lib/agent/client"
 import { decryptSecret } from "@/lib/agent/crypto"
 import { query } from "@/lib/database"
+import { getOwnedDatabase } from "@/lib/resources/databases"
 
 type RouteContext = {
   params: Promise<{
@@ -23,67 +24,18 @@ export async function GET(
   { params }: RouteContext,
 ) {
   try {
-    const { response: authError } = await requireSession()
+    const { session, response: authError } = await requireSession()
     if (authError) return authError
 
     const { id } = await params
 
-    const result = await query<{
-      id: string
-      name: string
-      engine: string
-      container_name: string
-      container_id: string | null
-      image: string
-      status: string
-      database_name: string
-      username: string
-      password_encrypted: string
-      internal_host: string
-      internal_port: number
-      created_at: string
-      server_id: string
-      server_name: string | null
-      server_hostname: string | null
-    }>(
-      `
-        SELECT
-          d.id,
-          d.name,
-          d.engine,
-          d.container_name,
-          d.container_id,
-          d.image,
-          d.status,
-          d.database_name,
-          d.username,
-          d.password_encrypted,
-          d.internal_host,
-          d.internal_port,
-          d.created_at,
-          d.server_id,
-          srv.name AS server_name,
-          srv.hostname AS server_hostname
-        FROM databases d
-        LEFT JOIN servers srv
-          ON srv.id = d.server_id
-        WHERE d.id = $1
-        LIMIT 1
-      `,
-      [id],
+    const { database: owned, response: ownedError } = await getOwnedDatabase(
+      id,
+      session,
     )
+    if (ownedError) return ownedError
 
-    if (result.rows.length === 0) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message: "Base de données introuvable.",
-        },
-        { status: 404 },
-      )
-    }
-
-    const { password_encrypted, ...database } = result.rows[0]
+    const { password_encrypted, ...database } = owned
 
     let password: string
 
@@ -126,36 +78,16 @@ export async function DELETE(
   { params }: RouteContext,
 ) {
   try {
-    const { response: authError } = await requireSession()
+    const { session, response: authError } = await requireSession()
     if (authError) return authError
 
     const { id } = await params
 
-    const result = await query<{
-      id: string
-      name: string
-      server_id: string
-    }>(
-      `
-        SELECT id, name, server_id
-        FROM databases
-        WHERE id = $1
-        LIMIT 1
-      `,
-      [id],
+    const { database, response: ownedError } = await getOwnedDatabase(
+      id,
+      session,
     )
-
-    if (result.rows.length === 0) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message: "Base de données introuvable.",
-        },
-        { status: 404 },
-      )
-    }
-
-    const database = result.rows[0]
+    if (ownedError) return ownedError
 
     try {
       await deleteAgentDatabase(database.server_id, database.name)

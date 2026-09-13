@@ -3,6 +3,7 @@ import { NextResponse } from "next/server"
 import { requireSession } from "@/lib/auth/guard"
 import { deleteAgentDatabaseBackup } from "@/lib/agent/client"
 import { query } from "@/lib/database"
+import { getOwnedDatabase } from "@/lib/resources/databases"
 
 type RouteContext = {
   params: Promise<{
@@ -23,10 +24,13 @@ export async function DELETE(
   { params }: RouteContext,
 ) {
   try {
-    const { response: authError } = await requireSession()
+    const { session, response: authError } = await requireSession()
     if (authError) return authError
 
     const { id, backupId } = await params
+
+    const { response: ownedError } = await getOwnedDatabase(id, session)
+    if (ownedError) return ownedError
 
     const result = await query<BackupWithDatabase>(
       `
