@@ -27,6 +27,11 @@ const buildDeploymentSchema =
       .regex(
         /^[A-Za-z0-9._/-]+$/,
       ),
+
+    tenantId: z
+      .string()
+      .trim()
+      .uuid("tenantId doit être un UUID valide."),
   })
 
 export async function buildDeploymentController(
@@ -72,6 +77,8 @@ export async function buildDeploymentController(
           parsed.data.repositoryUrl,
         branch:
           parsed.data.branch,
+        tenantId:
+          parsed.data.tenantId,
       })
 
     return {

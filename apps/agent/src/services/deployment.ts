@@ -643,7 +643,10 @@ export async function deployDeployment({
   siteName,
   repositoryUrl,
   branch,
-}: BuildDeploymentInput): Promise<DeployDeploymentResult> {
+  tenantId,
+}: BuildDeploymentInput & {
+  tenantId: string
+}): Promise<DeployDeploymentResult> {
   const build =
     await buildDeployment({
       siteName,
@@ -662,6 +665,8 @@ export async function deployDeployment({
 
         imageName:
           build.imageName,
+
+        tenantId,
       })
 
     /*

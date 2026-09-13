@@ -321,6 +321,7 @@ export async function POST(request: Request) {
     try {
       const agentResponse = (await createAgentSite(server.id, {
         name,
+        tenantId: session.user_id,
       })) as { site?: AgentCreatedSite }
 
       if (!agentResponse.site) {

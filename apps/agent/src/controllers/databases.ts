@@ -14,6 +14,11 @@ const createDatabaseSchema = z.object({
     ),
 
   engine: z.enum(["postgres"]),
+
+  tenantId: z
+    .string()
+    .trim()
+    .uuid("tenantId doit être un UUID valide."),
 })
 
 export async function createDatabaseController(request: Request) {
@@ -43,6 +48,7 @@ export async function createDatabaseController(request: Request) {
     const database = await createDatabase({
       name: result.data.name,
       engine: result.data.engine,
+      tenantId: result.data.tenantId,
     })
 
     return {

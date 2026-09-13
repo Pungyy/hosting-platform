@@ -22,6 +22,7 @@ const DOCKER_LOG_CONFIG = {
 
 export type CreateSiteInput = {
   name: string
+  tenantId: string
 }
 
 export type SiteAction =
@@ -32,6 +33,7 @@ export type SiteAction =
 export type CreateDeploymentContainerInput = {
   siteName: string
   imageName: string
+  tenantId: string
 }
 
 function getContainerName(name: string) {
@@ -56,6 +58,38 @@ function validateSiteName(name: string) {
       "Nom de site invalide.",
     )
   }
+}
+
+const TENANT_NETWORK_PREFIX = "hosting-tenant-"
+
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+/*
+ * `tenantId` provient du corps JSON envoyé par le Panel (jamais du
+ * client final — le Panel le calcule depuis session.user_id à la
+ * création, ou depuis resource.user_id pour toute opération sur une
+ * ressource existante), mais reste une valeur externe du point de vue
+ * de l'Agent. Sans validation stricte, elle nourrirait directement un
+ * nom de réseau Docker et, potentiellement, un filtre `name`
+ * (interprété comme une regex) — même classe de risque que
+ * validateDatabaseName() dans services/backup.ts.
+ */
+export function validateTenantId(
+  tenantId: string,
+) {
+  if (!UUID_PATTERN.test(tenantId)) {
+    throw new Error(
+      "Identifiant de tenant invalide.",
+    )
+  }
+}
+
+export function getTenantNetworkName(
+  tenantId: string,
+) {
+  validateTenantId(tenantId)
+  return `${TENANT_NETWORK_PREFIX}${tenantId}`
 }
 
 export async function ensureNetwork(
@@ -87,14 +121,19 @@ export async function ensureNetwork(
   })
 }
 
-async function ensureSiteNetworks() {
-  await ensureNetwork(
-    config.dockerNetwork,
-  )
+async function ensureSiteNetworks(
+  tenantId: string,
+) {
+  const tenantNetwork =
+    getTenantNetworkName(tenantId)
+
+  await ensureNetwork(tenantNetwork)
 
   await ensureNetwork(
     config.proxyNetwork,
   )
+
+  return tenantNetwork
 }
 
 async function getContainerByExactName(
@@ -197,8 +236,10 @@ export async function getManagedSiteStatuses() {
  */
 export async function createSite({
   name,
+  tenantId,
 }: CreateSiteInput) {
   validateSiteName(name)
+  validateTenantId(tenantId)
 
   const containerName =
     getContainerName(name)
@@ -214,7 +255,8 @@ export async function createSite({
     )
   }
 
-  await ensureSiteNetworks()
+  const tenantNetwork =
+    await ensureSiteNetworks(tenantId)
 
   const container =
     await docker.createContainer({
@@ -252,7 +294,7 @@ export async function createSite({
 
       NetworkingConfig: {
         EndpointsConfig: {
-          [config.dockerNetwork]: {},
+          [tenantNetwork]: {},
           [config.proxyNetwork]: {},
         },
       },
@@ -266,6 +308,9 @@ export async function createSite({
 
         "hosting.platform.site":
           name,
+
+        "hosting.platform.tenant":
+          tenantId,
 
         "hosting.platform.version":
           "1",
@@ -363,8 +408,10 @@ export async function createSite({
 export async function createDeploymentContainer({
   siteName,
   imageName,
+  tenantId,
 }: CreateDeploymentContainerInput) {
   validateSiteName(siteName)
+  validateTenantId(tenantId)
 
   const containerName =
     getContainerName(siteName)
@@ -373,6 +420,38 @@ export async function createDeploymentContainer({
     getDeploymentContainerName(
       siteName,
     )
+
+  /*
+   * Le tenant d'un site est immuable après sa création : si le
+   * container existant porte un label hosting.platform.tenant
+   * différent du tenantId fourni pour ce redéploiement, on refuse —
+   * défense en profondeur contre une réattribution accidentelle ou
+   * malveillante vers le réseau d'un autre tenant, indépendante de la
+   * confiance déjà accordée au canal Panel -> Agent.
+   */
+  const existingContainer =
+    await getContainerByExactName(
+      containerName,
+    )
+
+  if (existingContainer) {
+    const existingInspect =
+      await existingContainer.inspect()
+
+    const existingTenant =
+      existingInspect.Config?.Labels?.[
+        "hosting.platform.tenant"
+      ]
+
+    if (
+      existingTenant &&
+      existingTenant !== tenantId
+    ) {
+      throw new Error(
+        "Le tenant fourni ne correspond pas au propriétaire existant de ce site.",
+      )
+    }
+  }
 
   /*
    * Vérifie que l'image existe.
@@ -431,7 +510,8 @@ export async function createDeploymentContainer({
     )
   }
 
-  await ensureSiteNetworks()
+  const tenantNetwork =
+    await ensureSiteNetworks(tenantId)
 
   /*
    * Si un ancien container temporaire
@@ -499,7 +579,7 @@ export async function createDeploymentContainer({
 
       NetworkingConfig: {
         EndpointsConfig: {
-          [config.dockerNetwork]: {},
+          [tenantNetwork]: {},
           [config.proxyNetwork]: {},
         },
       },
@@ -513,6 +593,9 @@ export async function createDeploymentContainer({
 
         "hosting.platform.site":
           siteName,
+
+        "hosting.platform.tenant":
+          tenantId,
 
         "hosting.platform.version":
           "1",
@@ -892,5 +975,135 @@ export async function deleteSite(
   }
 }
 
+/*
+ * ============================================================
+ * Migration réseau (hosting-sites -> hosting-tenant-<uuid>)
+ * ============================================================
+ *
+ * Ces fonctions ne sont JAMAIS appelées automatiquement (ni à la
+ * création, ni au démarrage de l'Agent) : elles ne s'exécutent que
+ * lorsqu'un admin déclenche explicitement la migration d'un site déjà
+ * existant, via les routes dédiées. `docker network connect/disconnect`
+ * agissent sur un container en cours d'exécution, sans redémarrage.
+ */
 
+/*
+ * Étape 1 (additive, sans risque) : rattache le site à son réseau
+ * tenant, EN PLUS du réseau `hosting-sites` existant. Idempotente —
+ * un second appel avec le même tenantId ne fait rien de plus.
+ *
+ * Même défense en profondeur que createDeploymentContainer : si le
+ * container porte déjà un label hosting.platform.tenant différent du
+ * tenantId fourni, on refuse plutôt que de le rattacher au réseau
+ * d'un autre tenant.
+ */
+export async function migrateSiteToTenantNetwork(
+  name: string,
+  tenantId: string,
+) {
+  validateSiteName(name)
+  validateTenantId(tenantId)
+
+  const container =
+    await getSiteContainer(name)
+
+  if (!container) {
+    throw new Error(
+      `Le container du site "${name}" est introuvable.`,
+    )
+  }
+
+  const inspect =
+    await container.inspect()
+
+  const existingTenant =
+    inspect.Config?.Labels?.[
+      "hosting.platform.tenant"
+    ]
+
+  if (
+    existingTenant &&
+    existingTenant !== tenantId
+  ) {
+    throw new Error(
+      "Le tenant fourni ne correspond pas au propriétaire existant de ce site.",
+    )
+  }
+
+  const tenantNetwork =
+    getTenantNetworkName(tenantId)
+
+  await ensureNetwork(tenantNetwork)
+
+  const alreadyConnected = Boolean(
+    inspect.NetworkSettings
+      ?.Networks?.[tenantNetwork],
+  )
+
+  if (!alreadyConnected) {
+    await docker
+      .getNetwork(tenantNetwork)
+      .connect({
+        Container: inspect.Id,
+      })
+  }
+
+  return {
+    name,
+    tenantNetwork,
+    connected: true,
+    legacyNetworkStillAttached:
+      Boolean(
+        inspect.NetworkSettings
+          ?.Networks?.[
+          config.dockerNetwork
+        ],
+      ),
+  }
+}
+
+/*
+ * Étape 2 (isolante) : ne retirer `hosting-sites` qu'une fois
+ * l'étape 1 vérifiée pour ce site. Idempotente — un site déjà
+ * détaché ne provoque pas d'erreur.
+ */
+export async function disconnectSiteFromLegacyNetwork(
+  name: string,
+) {
+  validateSiteName(name)
+
+  const container =
+    await getSiteContainer(name)
+
+  if (!container) {
+    throw new Error(
+      `Le container du site "${name}" est introuvable.`,
+    )
+  }
+
+  const inspect =
+    await container.inspect()
+
+  const stillConnected = Boolean(
+    inspect.NetworkSettings
+      ?.Networks?.[
+      config.dockerNetwork
+    ],
+  )
+
+  if (stillConnected) {
+    await docker
+      .getNetwork(
+        config.dockerNetwork,
+      )
+      .disconnect({
+        Container: inspect.Id,
+      })
+  }
+
+  return {
+    name,
+    disconnected: true,
+  }
+}
 

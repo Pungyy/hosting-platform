@@ -109,6 +109,7 @@ export async function POST(
           repositoryUrl:
             site.repository_url,
           branch,
+          tenantId: site.user_id,
         },
       ) as DeploymentResponse
 

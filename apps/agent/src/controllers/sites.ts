@@ -12,6 +12,11 @@ const createSiteSchema = z.object({
       /^[a-z0-9]+(?:-[a-z0-9]+)*$/,
       "Le nom doit contenir uniquement des lettres minuscules, chiffres et tirets.",
     ),
+
+  tenantId: z
+    .string()
+    .trim()
+    .uuid("tenantId doit être un UUID valide."),
 })
 
 export async function createSiteController(request: Request) {
@@ -40,6 +45,7 @@ export async function createSiteController(request: Request) {
   try {
     const site = await createSite({
       name: result.data.name,
+      tenantId: result.data.tenantId,
     })
 
     return {

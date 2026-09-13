@@ -4,7 +4,11 @@ import Docker from "dockerode"
 
 import { config } from "../config.js"
 import { deleteAllBackups } from "./backup.js"
-import { ensureNetwork } from "./docker.js"
+import {
+  ensureNetwork,
+  getTenantNetworkName,
+  validateTenantId,
+} from "./docker.js"
 
 const docker = new Docker()
 
@@ -51,6 +55,7 @@ const ENGINES: Record<string, EngineConfig> = {
 export type CreateDatabaseInput = {
   name: string
   engine: string
+  tenantId: string
 }
 
 export type DatabaseAction = "start" | "stop" | "restart"
@@ -141,8 +146,10 @@ export async function getManagedDatabaseStatuses() {
 export async function createDatabase({
   name,
   engine,
+  tenantId,
 }: CreateDatabaseInput) {
   validateDatabaseName(name)
+  validateTenantId(tenantId)
 
   const engineConfig = ENGINES[engine]
 
@@ -163,7 +170,9 @@ export async function createDatabase({
     )
   }
 
-  await ensureNetwork(config.dockerNetwork)
+  const tenantNetwork = getTenantNetworkName(tenantId)
+
+  await ensureNetwork(tenantNetwork)
 
   const databaseName = name.replace(/-/g, "_")
   const username = `${databaseName}_user`
@@ -231,7 +240,7 @@ export async function createDatabase({
 
     NetworkingConfig: {
       EndpointsConfig: {
-        [config.dockerNetwork]: {},
+        [tenantNetwork]: {},
       },
     },
 
@@ -239,6 +248,7 @@ export async function createDatabase({
       "hosting.platform.managed": "true",
       "hosting.platform.type": "database",
       "hosting.platform.database": name,
+      "hosting.platform.tenant": tenantId,
       "hosting.platform.engine": engine,
       "hosting.platform.version": "1",
     },
@@ -390,5 +400,93 @@ export async function deleteDatabase(name: string) {
   return {
     name,
     deleted: true,
+  }
+}
+
+/*
+ * Migration réseau (hosting-sites -> hosting-tenant-<uuid>) — même
+ * principe que les fonctions équivalentes de services/docker.ts
+ * (duplication volontaire, ce fichier reste autonome). Jamais
+ * appelées automatiquement : uniquement sur déclenchement explicite
+ * d'un admin, via les routes dédiées.
+ */
+export async function migrateDatabaseToTenantNetwork(
+  name: string,
+  tenantId: string,
+) {
+  validateDatabaseName(name)
+  validateTenantId(tenantId)
+
+  const container = await getDatabaseContainer(name)
+
+  if (!container) {
+    throw new Error(
+      `Le container de la base "${name}" est introuvable.`,
+    )
+  }
+
+  const inspect = await container.inspect()
+
+  const existingTenant =
+    inspect.Config?.Labels?.["hosting.platform.tenant"]
+
+  if (existingTenant && existingTenant !== tenantId) {
+    throw new Error(
+      "Le tenant fourni ne correspond pas au propriétaire existant de cette base.",
+    )
+  }
+
+  const tenantNetwork = getTenantNetworkName(tenantId)
+
+  await ensureNetwork(tenantNetwork)
+
+  const alreadyConnected = Boolean(
+    inspect.NetworkSettings?.Networks?.[tenantNetwork],
+  )
+
+  if (!alreadyConnected) {
+    await docker
+      .getNetwork(tenantNetwork)
+      .connect({ Container: inspect.Id })
+  }
+
+  return {
+    name,
+    tenantNetwork,
+    connected: true,
+    legacyNetworkStillAttached: Boolean(
+      inspect.NetworkSettings?.Networks?.[config.dockerNetwork],
+    ),
+  }
+}
+
+export async function disconnectDatabaseFromLegacyNetwork(
+  name: string,
+) {
+  validateDatabaseName(name)
+
+  const container = await getDatabaseContainer(name)
+
+  if (!container) {
+    throw new Error(
+      `Le container de la base "${name}" est introuvable.`,
+    )
+  }
+
+  const inspect = await container.inspect()
+
+  const stillConnected = Boolean(
+    inspect.NetworkSettings?.Networks?.[config.dockerNetwork],
+  )
+
+  if (stillConnected) {
+    await docker
+      .getNetwork(config.dockerNetwork)
+      .disconnect({ Container: inspect.Id })
+  }
+
+  return {
+    name,
+    disconnected: true,
   }
 }

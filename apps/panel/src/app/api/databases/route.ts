@@ -309,6 +309,7 @@ export async function POST(request: Request) {
       const agentResponse = await createAgentDatabase(serverId, {
         name,
         engine,
+        tenantId: session.user_id,
       })
 
       if (!agentResponse.database) {

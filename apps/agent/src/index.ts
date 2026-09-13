@@ -15,6 +15,8 @@ import {
   getSiteLogs,
   getSiteStatus,
   deleteSite,
+  migrateSiteToTenantNetwork,
+  disconnectSiteFromLegacyNetwork,
 } from "./services/docker.js"
 
 import {
@@ -29,6 +31,8 @@ import {
   executeDatabaseAction,
   getDatabaseLogs,
   getManagedDatabaseStatuses,
+  migrateDatabaseToTenantNetwork,
+  disconnectDatabaseFromLegacyNetwork,
 } from "./services/database.js"
 
 import { createDatabaseController } from "./controllers/databases.js"
@@ -646,6 +650,139 @@ app.delete(
 )
 
 /*
+ * Migration réseau (hosting-sites -> hosting-tenant-<uuid>).
+ *
+ * Jamais appelées automatiquement : uniquement sur déclenchement
+ * explicite d'un admin depuis le Panel (requireAdmin côté Panel,
+ * requireAgentToken + validation stricte du tenantId ici).
+ */
+
+const migrateNetworkSchema = z.object({
+  tenantId: z
+    .string()
+    .trim()
+    .uuid("tenantId doit être un UUID valide."),
+})
+
+app.post(
+  "/sites/:name/migrate-network",
+  requireAgentToken,
+  async (c) => {
+    try {
+      const name =
+        c.req.param("name")
+
+      if (!name) {
+        return c.json(
+          {
+            status: "error",
+            message:
+              "Nom du site manquant.",
+          },
+          400,
+        )
+      }
+
+      const body =
+        await c.req
+          .json()
+          .catch(() => null)
+
+      const parsed =
+        migrateNetworkSchema.safeParse(
+          body,
+        )
+
+      if (!parsed.success) {
+        return c.json(
+          {
+            status: "error",
+            message:
+              "tenantId manquant ou invalide.",
+          },
+          400,
+        )
+      }
+
+      const result =
+        await migrateSiteToTenantNetwork(
+          name,
+          parsed.data.tenantId,
+        )
+
+      return c.json({
+        status: "ok",
+        migration: result,
+      })
+    } catch (error) {
+      console.error(
+        "POST /sites/:name/migrate-network error:",
+        error,
+      )
+
+      return c.json(
+        {
+          status: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Impossible de migrer le réseau du site.",
+        },
+        500,
+      )
+    }
+  },
+)
+
+app.post(
+  "/sites/:name/disconnect-legacy-network",
+  requireAgentToken,
+  async (c) => {
+    try {
+      const name =
+        c.req.param("name")
+
+      if (!name) {
+        return c.json(
+          {
+            status: "error",
+            message:
+              "Nom du site manquant.",
+          },
+          400,
+        )
+      }
+
+      const result =
+        await disconnectSiteFromLegacyNetwork(
+          name,
+        )
+
+      return c.json({
+        status: "ok",
+        migration: result,
+      })
+    } catch (error) {
+      console.error(
+        "POST /sites/:name/disconnect-legacy-network error:",
+        error,
+      )
+
+      return c.json(
+        {
+          status: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Impossible de déconnecter le site du réseau legacy.",
+        },
+        500,
+      )
+    }
+  },
+)
+
+/*
  * ============================================================
  * Databases
  * ============================================================
@@ -883,6 +1020,129 @@ app.delete(
             error instanceof Error
               ? error.message
               : "Impossible de supprimer la base de données.",
+        },
+        500,
+      )
+    }
+  },
+)
+
+/*
+ * Migration réseau (hosting-sites -> hosting-tenant-<uuid>) — voir le
+ * commentaire équivalent sur les routes /sites/:name/*.
+ */
+
+app.post(
+  "/databases/:name/migrate-network",
+  requireAgentToken,
+  async (c) => {
+    try {
+      const name =
+        c.req.param("name")
+
+      if (!name) {
+        return c.json(
+          {
+            status: "error",
+            message:
+              "Nom de la base manquant.",
+          },
+          400,
+        )
+      }
+
+      const body =
+        await c.req
+          .json()
+          .catch(() => null)
+
+      const parsed =
+        migrateNetworkSchema.safeParse(
+          body,
+        )
+
+      if (!parsed.success) {
+        return c.json(
+          {
+            status: "error",
+            message:
+              "tenantId manquant ou invalide.",
+          },
+          400,
+        )
+      }
+
+      const result =
+        await migrateDatabaseToTenantNetwork(
+          name,
+          parsed.data.tenantId,
+        )
+
+      return c.json({
+        status: "ok",
+        migration: result,
+      })
+    } catch (error) {
+      console.error(
+        "POST /databases/:name/migrate-network error:",
+        error,
+      )
+
+      return c.json(
+        {
+          status: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Impossible de migrer le réseau de la base de données.",
+        },
+        500,
+      )
+    }
+  },
+)
+
+app.post(
+  "/databases/:name/disconnect-legacy-network",
+  requireAgentToken,
+  async (c) => {
+    try {
+      const name =
+        c.req.param("name")
+
+      if (!name) {
+        return c.json(
+          {
+            status: "error",
+            message:
+              "Nom de la base manquant.",
+          },
+          400,
+        )
+      }
+
+      const result =
+        await disconnectDatabaseFromLegacyNetwork(
+          name,
+        )
+
+      return c.json({
+        status: "ok",
+        migration: result,
+      })
+    } catch (error) {
+      console.error(
+        "POST /databases/:name/disconnect-legacy-network error:",
+        error,
+      )
+
+      return c.json(
+        {
+          status: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Impossible de déconnecter la base du réseau legacy.",
         },
         500,
       )

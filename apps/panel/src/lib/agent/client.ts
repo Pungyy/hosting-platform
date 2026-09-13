@@ -331,12 +331,46 @@ export async function deleteAgentSite(
   )
 }
 
+/*
+ * Migration réseau (hosting-sites -> hosting-tenant-<uuid>) — jamais
+ * appelées automatiquement, uniquement depuis une route Panel
+ * admin-only déclenchée explicitement.
+ */
+export async function migrateAgentSiteNetwork(
+  serverId: string,
+  siteName: string,
+  tenantId: string,
+) {
+  return agentRequest(
+    serverId,
+    `/sites/${encodeURIComponent(siteName)}/migrate-network`,
+    {
+      method: "POST",
+      body: JSON.stringify({ tenantId }),
+    },
+  )
+}
+
+export async function disconnectAgentSiteLegacyNetwork(
+  serverId: string,
+  siteName: string,
+) {
+  return agentRequest(
+    serverId,
+    `/sites/${encodeURIComponent(siteName)}/disconnect-legacy-network`,
+    {
+      method: "POST",
+    },
+  )
+}
+
 export async function deployAgentSite(
   serverId: string,
   data: {
     siteName: string
     repositoryUrl: string
     branch: string
+    tenantId: string
   },
 ) {
   return agentRequest(
@@ -380,6 +414,7 @@ export async function createAgentDatabase(
   data: {
     name: string
     engine: string
+    tenantId: string
   },
 ) {
   return agentRequest<{
@@ -453,6 +488,38 @@ export async function deleteAgentDatabase(
     `/databases/${encodeURIComponent(databaseName)}`,
     {
       method: "DELETE",
+    },
+  )
+}
+
+/*
+ * Migration réseau (hosting-sites -> hosting-tenant-<uuid>) — voir le
+ * commentaire équivalent sur migrateAgentSiteNetwork.
+ */
+export async function migrateAgentDatabaseNetwork(
+  serverId: string,
+  databaseName: string,
+  tenantId: string,
+) {
+  return agentRequest(
+    serverId,
+    `/databases/${encodeURIComponent(databaseName)}/migrate-network`,
+    {
+      method: "POST",
+      body: JSON.stringify({ tenantId }),
+    },
+  )
+}
+
+export async function disconnectAgentDatabaseLegacyNetwork(
+  serverId: string,
+  databaseName: string,
+) {
+  return agentRequest(
+    serverId,
+    `/databases/${encodeURIComponent(databaseName)}/disconnect-legacy-network`,
+    {
+      method: "POST",
     },
   )
 }
