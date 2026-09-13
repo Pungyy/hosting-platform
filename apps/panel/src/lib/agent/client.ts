@@ -1,4 +1,5 @@
 import { decryptAgentToken } from "@/lib/agent/crypto"
+import { ssrfSafeFetch } from "@/lib/agent/ssrf-guard"
 import { query } from "@/lib/database"
 
 type AgentResponse = {
@@ -77,6 +78,13 @@ async function getAgentConfig(
 
         agentToken:
           fallbackToken,
+
+        /*
+         * Configuré directement par l'opérateur dans son propre .env
+         * (jamais issu d'un enrôlement attaquable) — seul ce chemin
+         * peut légitimement cibler la loopback (Agent local de dev).
+         */
+        isFallback: true,
       }
     }
 
@@ -96,6 +104,8 @@ async function getAgentConfig(
       decryptAgentToken(
         server.agent_token_encrypted,
       ),
+
+    isFallback: false,
   }
 }
 
@@ -107,19 +117,24 @@ async function agentRequest<T = AgentResponse>(
   const {
     agentUrl,
     agentToken,
+    isFallback,
   } =
     await getAgentConfig(
       serverId,
     )
 
-  let response: Response
+  let response: {
+    ok: boolean
+    status: number
+    text: () => Promise<string>
+  }
 
   try {
     response =
-      await fetch(
+      await ssrfSafeFetch(
         `${agentUrl}${path}`,
         {
-          ...options,
+          method: options.method,
 
           signal:
             options.signal ??
@@ -134,11 +149,17 @@ async function agentRequest<T = AgentResponse>(
             Authorization:
               `Bearer ${agentToken}`,
 
-            ...(options.headers ?? {}),
+            ...(options.headers as
+              | Record<string, string>
+              | undefined ?? {}),
           },
 
-          cache: "no-store",
+          body:
+            typeof options.body === "string"
+              ? options.body
+              : undefined,
         },
+        { allowLoopback: isFallback },
       )
   } catch (error) {
     const name =
@@ -579,16 +600,21 @@ export async function downloadAgentDatabaseBackup(
   const {
     agentUrl,
     agentToken,
+    isFallback,
   } =
     await getAgentConfig(
       serverId,
     )
 
-  let response: Response
+  let response: {
+    ok: boolean
+    status: number
+    body: ReadableStream<Uint8Array> | null
+  }
 
   try {
     response =
-      await fetch(
+      await ssrfSafeFetch(
         `${agentUrl}/databases/${encodeURIComponent(databaseName)}/backups/${encodeURIComponent(filename)}`,
         {
           signal: AbortSignal.timeout(
@@ -599,9 +625,8 @@ export async function downloadAgentDatabaseBackup(
             Authorization:
               `Bearer ${agentToken}`,
           },
-
-          cache: "no-store",
         },
+        { allowLoopback: isFallback },
       )
   } catch (error) {
     const name =

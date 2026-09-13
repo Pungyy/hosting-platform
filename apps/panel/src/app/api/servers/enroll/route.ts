@@ -4,6 +4,10 @@ import { z } from "zod"
 
 import { query } from "@/lib/database"
 import { encryptAgentToken } from "@/lib/agent/crypto"
+import {
+  assertAgentUrlAllowed,
+  SsrfBlockedError,
+} from "@/lib/agent/ssrf-guard"
 
 const enrollSchema = z.object({
   token: z
@@ -33,7 +37,24 @@ const enrollSchema = z.object({
     .string()
     .trim()
     .url("L'URL de l'Agent est invalide.")
-    .max(500),
+    .max(500)
+    .refine(
+      (value) => {
+        try {
+          const protocol = new URL(value).protocol
+          return (
+            protocol === "http:" ||
+            protocol === "https:"
+          )
+        } catch {
+          return false
+        }
+      },
+      {
+        message:
+          "Seuls les schémas http:// et https:// sont autorisés pour l'URL de l'Agent.",
+      },
+    ),
 })
 
 export async function POST(
@@ -69,6 +90,30 @@ export async function POST(
       agentVersion,
       agentUrl,
     } = parsed.data
+
+    /*
+     * Rejette immédiatement une agentUrl pointant vers une adresse
+     * loopback ou de métadonnées cloud (résolution DNS incluse) —
+     * voir lib/agent/ssrf-guard.ts. Les réseaux privés (RFC1918,
+     * VPN...) restent autorisés : un Agent légitime peut y résider.
+     */
+    try {
+      await assertAgentUrlAllowed(agentUrl)
+    } catch (guardError) {
+      if (guardError instanceof SsrfBlockedError) {
+        return NextResponse.json(
+          {
+            status: "error",
+            message: guardError.message,
+          },
+          {
+            status: 400,
+          },
+        )
+      }
+
+      throw guardError
+    }
 
     /*
      * Le token d'enrôlement reçu n'est jamais

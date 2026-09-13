@@ -59,7 +59,11 @@ export async function GET(
 
     const backup = result.rows[0]
 
-    let agentResponse: Response
+    let agentResponse: {
+      ok: boolean
+      status: number
+      body: ReadableStream<Uint8Array> | null
+    }
 
     try {
       agentResponse = await downloadAgentDatabaseBackup(
