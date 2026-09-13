@@ -23,6 +23,36 @@ const BACKUPS_DIR =
 const FILENAME_PATTERN =
   /^\d{4}-\d{2}-\d{2}T\d{6}Z\.sql\.gz$/
 
+const DATABASE_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+
+/*
+ * Duplique volontairement database.ts:validateDatabaseName() — même
+ * raison que getDatabaseContainer ci-dessous : ce fichier reste
+ * autonome plutôt que de coupler deux modules déjà vérifiés
+ * séparément.
+ *
+ * `databaseName` arrive ici directement depuis le paramètre d'URL de
+ * l'Agent (index.ts, ex. POST /databases/:name/backups), donc AVANT
+ * toute validation de forme. Sans ce contrôle : (1) getContainerName()
+ * nourrit un filtre `name` de dockerode/Docker qui est interprété comme
+ * une regex — un nom comme ".*" ou "x$|hosting-db-victime" peut faire
+ * matcher le container d'un autre tenant ; (2) getBackupDir() nourrit
+ * directement path.join() — un nom comme "../../etc" peut faire sortir
+ * le chemin résolu du dossier de sauvegardes prévu (grave en
+ * particulier pour deleteAllBackups(), qui fait un rm recursive+force
+ * sur ce chemin). Appelée en tout premier dans chaque fonction exportée
+ * qui reçoit un `databaseName` brut, avant toute autre utilisation.
+ */
+export function validateDatabaseName(name: string) {
+  if (
+    !DATABASE_NAME_PATTERN.test(name) ||
+    name.length < 3 ||
+    name.length > 40
+  ) {
+    throw new Error("Nom de base de données invalide.")
+  }
+}
+
 function getContainerName(name: string) {
   return `${DB_PREFIX}${name}`
 }
@@ -49,6 +79,7 @@ async function getDatabaseContainer(containerName: string) {
 }
 
 export function getBackupDir(databaseName: string) {
+  validateDatabaseName(databaseName)
   return path.join(BACKUPS_DIR, databaseName)
 }
 
@@ -181,6 +212,8 @@ async function runPgDumpOnce(
 }
 
 export async function createBackup(databaseName: string) {
+  validateDatabaseName(databaseName)
+
   const container = await getDatabaseContainer(
     getContainerName(databaseName),
   )

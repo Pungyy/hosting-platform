@@ -142,6 +142,9 @@ importers:
       typescript:
         specifier: 7.0.2
         version: 7.0.2
+      vitest:
+        specifier: ^3.2.7
+        version: 3.2.7
 
   apps/panel:
     dependencies:
