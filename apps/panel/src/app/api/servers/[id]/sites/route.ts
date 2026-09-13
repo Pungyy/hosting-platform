@@ -2,6 +2,7 @@ import { NextResponse } from "next/server"
 import { z } from "zod"
 
 import { requireSession } from "@/lib/auth/guard"
+import { requireAdmin } from "@/lib/auth/roles"
 import {
   createAgentSite,
   getAgentHealth,
@@ -38,8 +39,11 @@ export async function GET(
   },
 ) {
   try {
-    const { response: authError } = await requireSession()
+    const { session, response: authError } = await requireSession()
     if (authError) return authError
+
+    const { response: roleError } = requireAdmin(session)
+    if (roleError) return roleError
 
     const { id } = await context.params
 
@@ -65,6 +69,16 @@ export async function GET(
   }
 }
 
+/*
+ * Route legacy conservée volontairement (pas de duplication du chemin
+ * de création pour un utilisateur normal : celui-ci passe exclusivement
+ * par POST /api/sites, qui sélectionne automatiquement un serveur
+ * disponible). Cette route reste utile pour un admin qui veut cibler
+ * explicitement un serveur précis (ex. valider un serveur fraîchement
+ * enrôlé) — c'est la seule différence fonctionnelle avec /api/sites.
+ * Comme /api/sites, le tenant du site créé est toujours le créateur
+ * lui-même (session.user_id), jamais une valeur fournie par le client.
+ */
 export async function POST(
   request: Request,
   context: {
@@ -74,6 +88,9 @@ export async function POST(
   try {
     const { session, response: authError } = await requireSession()
     if (authError) return authError
+
+    const { response: roleError } = requireAdmin(session)
+    if (roleError) return roleError
 
     const { id: serverId } = await context.params
 
@@ -174,7 +191,7 @@ export async function POST(
      */
     const agentResponse = await createAgentSite(
       serverId,
-      { name },
+      { name, tenantId: session.user_id },
     )
 
     const agentSite = agentResponse.site as

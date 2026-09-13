@@ -90,11 +90,14 @@ export async function POST(
       [dbStatus, data.database?.containerId ?? null, id],
     )
 
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- extrait volontairement pour l'exclure de la réponse
+    const { password_encrypted, ...safeDatabase } = database
+
     return NextResponse.json({
       status: "ok",
       action,
       database: {
-        ...database,
+        ...safeDatabase,
         status: dbStatus,
       },
     })

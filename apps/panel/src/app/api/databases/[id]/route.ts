@@ -106,10 +106,13 @@ export async function DELETE(
 
     await query(`DELETE FROM databases WHERE id = $1`, [id])
 
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- extrait volontairement pour l'exclure de la réponse
+    const { password_encrypted, ...safeDatabase } = database
+
     return NextResponse.json({
       status: "ok",
       message: "Base de données supprimée.",
-      database,
+      database: safeDatabase,
     })
   } catch (error) {
     console.error("DELETE /api/databases/[id] error:", error)
