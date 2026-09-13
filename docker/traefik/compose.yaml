@@ -9,7 +9,7 @@
 #   docker network create hosting-proxy && docker network create hosting-sites
 #
 # Démarrage :
-#   cp .env.example .env      # puis renseigner AGENT_TOKEN (= apps/agent/.env)
+#   cp .env.example .env      # puis renseigner TRAEFIK_TOKEN (= apps/agent/.env -> TRAEFIK_TOKEN)
 #   docker compose up -d
 
 services:
@@ -25,7 +25,7 @@ services:
       - "--entrypoints.websecure.address=:443"
       - "--providers.http.endpoint=http://host.docker.internal:4000/traefik/config"
       - "--providers.http.pollInterval=2s"
-      - "--providers.http.headers.Authorization=Bearer ${AGENT_TOKEN:?AGENT_TOKEN manquant — copiez .env.example vers .env}"
+      - "--providers.http.headers.Authorization=Bearer ${TRAEFIK_TOKEN:?TRAEFIK_TOKEN manquant — copiez .env.example vers .env}"
       - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
       - "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"
       - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"

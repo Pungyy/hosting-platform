@@ -12,6 +12,7 @@ export default defineConfig({
      */
     env: {
       AGENT_TOKEN: "test-static-agent-token-0123456789abcdef",
+      TRAEFIK_TOKEN: "test-static-traefik-token-fedcba9876543210",
     },
   },
 })

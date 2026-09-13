@@ -39,7 +39,10 @@ import {
   getBackupFilePath,
 } from "./services/backup.js"
 
-import { requireAgentToken } from "./middleware/auth.js"
+import {
+  requireAgentToken,
+  requireTraefikToken,
+} from "./middleware/auth.js"
 
 import {
   buildDeploymentController,
@@ -223,7 +226,7 @@ app.get(
 
 app.get(
   "/traefik/config",
-  requireAgentToken,
+  requireTraefikToken,
   async (c) => {
     try {
       const traefikConfig =
