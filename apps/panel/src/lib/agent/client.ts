@@ -433,6 +433,22 @@ export const AGENT_POST_BUILD_BUDGET_MS = 2 * 60 * 1000
 export const AGENT_DEPLOYMENT_TIMEOUT_MS =
   AGENT_BUILD_BUDGET_MS + AGENT_POST_BUILD_BUDGET_MS
 
+/*
+ * Budget de temps de la sauvegarde (finding M2, "timeout pg_dump") —
+ * même principe que AGENT_DEPLOYMENT_TIMEOUT_MS ci-dessus : le Panel
+ * décide de la durée totale qu'il autorise pour l'ENSEMBLE de
+ * l'opération pg_dump côté Agent (toutes les tentatives de retry
+ * comprises), la transmet explicitement (`backupTimeoutMs`, voir
+ * controllers/backups.ts côté Agent), et lib/resources/backups.ts
+ * dérive son seuil de réclamation ("stale lock") de cette même
+ * constante plutôt que de choisir un second nombre indépendant.
+ *
+ * Valeur choisie pour préserver EXACTEMENT le timeout HTTP déjà en
+ * place ci-dessous (10 min, inchangé) tout en le rendant dérivé d'un
+ * budget explicite plutôt que d'un nombre isolé.
+ */
+export const AGENT_BACKUP_TIMEOUT_MS = 9 * 60 * 1000
+
 export async function deployAgentSite(
   serverId: string,
   data: {
@@ -617,12 +633,21 @@ export async function createAgentDatabaseBackup(
     {
       method: "POST",
 
+      body: JSON.stringify({
+        backupTimeoutMs: AGENT_BACKUP_TIMEOUT_MS,
+      }),
+
       /*
        * `pg_dump` est synchrone côté Agent, comme le build de
-       * déploiement — peut prendre du temps sur une grosse base.
+       * déploiement — peut prendre du temps sur une grosse base. Le
+       * budget transmis (AGENT_BACKUP_TIMEOUT_MS) doit TOUJOURS
+       * expirer avant ce timeout HTTP, sinon le Panel abandonnerait
+       * avant que l'Agent n'ait eu la moindre chance de répondre
+       * proprement — marge d'une minute pour le transit réseau, comme
+       * pour le déploiement (finding H1).
        */
       signal: AbortSignal.timeout(
-        10 * 60 * 1000,
+        AGENT_BACKUP_TIMEOUT_MS + 60_000,
       ),
     },
   )

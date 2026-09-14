@@ -63,12 +63,16 @@ function getContainerName(name: string) {
  * chaque fichier reste autonome plutôt que de coupler des modules déjà
  * vérifiés séparément.
  */
-async function getDatabaseContainer(containerName: string) {
+async function getDatabaseContainer(
+  containerName: string,
+  abortSignal?: AbortSignal,
+) {
   const containers = await docker.listContainers({
     all: true,
     filters: JSON.stringify({
       name: [`^/${containerName}$`],
     }),
+    abortSignal,
   })
 
   if (containers.length === 0) {
@@ -139,6 +143,162 @@ function sleep(ms: number) {
 }
 
 /*
+ * Version annulable de sleep() : se réveille immédiatement si le
+ * signal se déclenche pendant l'attente, plutôt que de laisser la
+ * boucle de retry gaspiller du temps sur une pause inutile une fois le
+ * délai global déjà dépassé (finding M2, "budget global").
+ */
+function sleepAbortable(
+  ms: number,
+  signal: AbortSignal,
+): Promise<void> {
+  if (signal.aborted) {
+    return Promise.resolve()
+  }
+
+  return new Promise((resolve) => {
+    const handle = setTimeout(resolve, ms)
+
+    signal.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(handle)
+        resolve()
+      },
+      { once: true },
+    )
+  })
+}
+
+/*
+ * Levée quand createBackup() est annulé pour dépassement du délai de
+ * sécurité (finding M2) — distincte d'une erreur pg_dump authentique
+ * pour que l'appelant (controllers/backups.ts) puisse répondre avec un
+ * signal explicite (`timeout: true`), même mécanisme que
+ * DeploymentTimeoutError (finding H1, services/deployment.ts).
+ */
+export class BackupTimeoutError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "BackupTimeoutError"
+  }
+}
+
+/*
+ * Budget de temps de la sauvegarde (finding M2, "timeout pg_dump").
+ *
+ * Le PANEL est l'unique source de vérité sur la durée totale
+ * autorisée pour l'ENSEMBLE de l'opération (toutes les tentatives de
+ * retry comprises), et la transmet explicitement à chaque appel
+ * (`backupTimeoutMs`, voir controllers/backups.ts) — même
+ * architecture que AGENT_DEPLOYMENT_TIMEOUT_MS (finding H1). Le
+ * timeout HTTP existant côté Panel (10 min, voir
+ * apps/panel/src/lib/agent/client.ts:createAgentDatabaseBackup) DEVIENT
+ * la source de cette valeur (AGENT_BACKUP_TIMEOUT_MS = 9 min + 1 min de
+ * marge réseau = 10 min, valeur observable inchangée) plutôt qu'un
+ * second nombre indépendant.
+ *
+ * L'Agent ne fait jamais une confiance illimitée à cette valeur :
+ * DEFAULT_BACKUP_TIMEOUT_MS sert de repli si le champ est absent
+ * (rétrocompat), et MIN/MAX_BACKUP_TIMEOUT_MS bornent ce qui est
+ * accepté quelle que soit la valeur reçue (défense en profondeur).
+ */
+export const DEFAULT_BACKUP_TIMEOUT_MS = 9 * 60 * 1000
+export const MIN_BACKUP_TIMEOUT_MS = 30 * 1000
+export const MAX_BACKUP_TIMEOUT_MS = 15 * 60 * 1000
+
+export function resolveBackupTimeoutMs(
+  requestedMs?: number,
+): number {
+  const requested = requestedMs ?? DEFAULT_BACKUP_TIMEOUT_MS
+
+  return Math.min(
+    Math.max(requested, MIN_BACKUP_TIMEOUT_MS),
+    MAX_BACKUP_TIMEOUT_MS,
+  )
+}
+
+/*
+ * Délai de grâce entre un SIGTERM et un SIGKILL lors de l'arrêt forcé
+ * de pg_dump — même logique qu'un `docker stop` (arrêt propre d'abord,
+ * arrêt brutal seulement si le process ne répond pas).
+ */
+const KILL_GRACE_MS = 5_000
+
+/*
+ * `docker exec` n'a pas de primitive d'annulation côté daemon
+ * (contrairement à docker.buildImage(), vérifié pour H1 : annuler un
+ * abortSignal transmis à buildImage() coupe la connexion HTTP que le
+ * daemon suit pendant tout le build ; `docker exec` n'a pas
+ * d'équivalent — annuler notre lecture du flux d'attach n'a AUCUNE
+ * garantie de tuer le process qui tourne à l'intérieur du container).
+ * Le seul mécanisme fiable est d'envoyer un signal explicite au process
+ * pg_dump, via un SECOND exec dans le MÊME container.
+ *
+ * DEUX pièges vérifiés empiriquement avant cette implémentation
+ * (jamais assumés) :
+ *
+ * 1. exec.inspect().Pid N'EST PAS le PID vu depuis l'intérieur du
+ *    container — c'est le PID vu depuis le namespace de l'HÔTE (vérifié
+ *    par comparaison directe avec `ps aux` exécuté dans le même
+ *    container : deux numéros totalement différents). Un `kill <pid>`
+ *    lancé par un exec DANS le container (donc dans le namespace PID du
+ *    container) ne peut donc jamais cibler ce PID — il échoue
+ *    silencieusement ("No such process"). On cible donc le process par
+ *    NOM (`pkill pg_dump`), qui opère entièrement à l'intérieur du
+ *    namespace PID du container, sans jamais avoir besoin de traduire
+ *    un PID entre namespaces.
+ *
+ * 2. exec.start() SANS `Detach: true` fait attendre par le daemon
+ *    Docker un flux de sortie que personne ne lit ici (AttachStdout/
+ *    AttachStderr à `false` seulement à la CRÉATION de l'exec ne suffit
+ *    pas) — la commande de kill elle-même ne se termine alors jamais
+ *    (vérifié : sans `Detach: true`, le process cible restait "Running"
+ *    indéfiniment car le kill lui-même ne s'exécutait jamais). `Detach:
+ *    true` est donc obligatoire ici.
+ *
+ * `pkill pg_dump` reste strictement scopé au container de CETTE base
+ * (jamais un autre container/tenant) puisque `container` provient déjà
+ * de getDatabaseContainer(databaseName) validé par l'appelant — et ne
+ * peut, par construction du verrou Panel (une seule sauvegarde
+ * 'creating' à la fois par base), jamais matcher qu'un unique pg_dump
+ * légitime à l'intérieur de ce même container.
+ */
+async function sendSignalToProcess(
+  container: Docker.Container,
+  signal: "TERM" | "KILL",
+) {
+  const killExec = await container.exec({
+    Cmd: ["pkill", `-${signal}`, "pg_dump"],
+    AttachStdout: false,
+    AttachStderr: false,
+  })
+
+  await killExec.start({ Detach: true })
+}
+
+async function killPgDumpProcess(
+  container: Docker.Container,
+  exec: Docker.Exec,
+) {
+  const info = await exec.inspect().catch(() => null)
+
+  if (!info?.Running) {
+    return
+  }
+
+  await sendSignalToProcess(container, "TERM")
+
+  await sleep(KILL_GRACE_MS)
+
+  const stillRunning = await exec.inspect().catch(() => null)
+
+  if (stillRunning?.Running) {
+    await sendSignalToProcess(container, "KILL")
+  }
+}
+
+/*
  * Erreurs typiques d'un Postgres pas encore complètement démarré :
  * l'entrypoint officiel fait tourner une instance temporaire pour les
  * scripts d'init (accepte déjà des connexions, mais la base cible et
@@ -155,6 +315,7 @@ async function runPgDumpOnce(
   dbName: string,
   password: string,
   filePath: string,
+  abortSignal: AbortSignal,
 ) {
   const exec = await container.exec({
     Cmd: ["pg_dump", "-U", username, "-d", dbName, "--no-owner"],
@@ -189,14 +350,66 @@ async function runPgDumpOnce(
     stderr.end()
   })
 
+  /*
+   * Finding M2 ("timeout pg_dump") : si le délai global expire PENDANT
+   * que ce pg_dump tourne, on tue réellement le process (voir
+   * killPgDumpProcess ci-dessus) — jamais un simple abandon de notre
+   * lecture du flux qui laisserait pg_dump continuer en arrière-plan.
+   * `timedOut` est la source de vérité locale (le signal peut aussi
+   * s'être déclenché entre deux tentatives, sans jamais atteindre ce
+   * gestionnaire) : voir les deux vérifications explicites plus bas.
+   */
+  let timedOut = false
+
+  const onAbort = () => {
+    timedOut = true
+
+    killPgDumpProcess(container, exec).catch((error) => {
+      console.error(
+        `[backup] Impossible de tuer le process pg_dump (exec ${exec.id}) :`,
+        error,
+      )
+    })
+  }
+
+  if (abortSignal.aborted) {
+    onAbort()
+  } else {
+    abortSignal.addEventListener("abort", onAbort, { once: true })
+  }
+
   try {
     await pipeline(stdout, createGzip(), createWriteStream(filePath))
   } catch (error) {
     await unlink(filePath).catch(() => {})
+
+    if (timedOut) {
+      throw new BackupTimeoutError(
+        "pg_dump a été annulé pour dépassement du délai de sécurité.",
+      )
+    }
+
     throw error
+  } finally {
+    abortSignal.removeEventListener("abort", onAbort)
   }
 
   const execInfo = await exec.inspect()
+
+  /*
+   * Vérifié APRÈS la lecture de exitCode (un process tué par SIGTERM
+   * peut terminer son flux proprement avant que le pipeline ne rejette
+   * — voir le commentaire de killPgDumpProcess) : seul `timedOut`
+   * indique de façon certaine que C'EST NOUS qui avons interrompu
+   * l'opération, jamais un échec pg_dump normal.
+   */
+  if (timedOut) {
+    await unlink(filePath).catch(() => {})
+
+    throw new BackupTimeoutError(
+      "pg_dump a été annulé pour dépassement du délai de sécurité.",
+    )
+  }
 
   if (execInfo.ExitCode !== 0) {
     await unlink(filePath).catch(() => {})
@@ -211,75 +424,125 @@ async function runPgDumpOnce(
   }
 }
 
-export async function createBackup(databaseName: string) {
+export async function createBackup(
+  databaseName: string,
+  backupTimeoutMs?: number,
+) {
   validateDatabaseName(databaseName)
 
-  const container = await getDatabaseContainer(
-    getContainerName(databaseName),
-  )
-
-  if (!container) {
-    throw new Error(
-      `Le container de la base "${databaseName}" est introuvable.`,
-    )
-  }
-
-  const inspect = await container.inspect()
-
-  if (!inspect.State?.Running) {
-    throw new Error(
-      "La base doit être en ligne pour être sauvegardée.",
-    )
-  }
-
-  const env = parseContainerEnv(inspect.Config?.Env)
-  const username = env.POSTGRES_USER
-  const dbName = env.POSTGRES_DB
-  const password = env.POSTGRES_PASSWORD
-
-  if (!username || !dbName || !password) {
-    throw new Error(
-      "Configuration de la base introuvable sur le container.",
-    )
-  }
-
-  const dir = getBackupDir(databaseName)
-  await mkdir(dir, { recursive: true })
-
-  const filename = generateFilename()
-  const filePath = path.join(dir, filename)
+  const timeoutMs = resolveBackupTimeoutMs(backupTimeoutMs)
 
   /*
-   * Un container "Running" ne veut pas dire que la base cible est déjà
-   * utilisable (voir TRANSIENT_ERROR_PATTERN ci-dessus) : sur une base
-   * tout juste créée, `pg_dump` peut échouer plusieurs fois de suite
-   * avant que l'instance finale de Postgres soit prête. On retente
-   * uniquement sur ce type d'erreur précis, jusqu'à ~20s au total.
+   * Finding M2 ("timeout pg_dump") : UN SEUL AbortController pour
+   * l'INTÉGRALITÉ de l'opération, tentatives de retry comprises —
+   * jamais un budget par tentative, qui multiplierait le délai réel
+   * par jusqu'à maxAttempts (ici 20×). Le signal, une fois déclenché,
+   * est la seule source de vérité pour distinguer une annulation par
+   * timeout d'une erreur pg_dump authentique (voir runPgDumpOnce).
    */
-  const maxAttempts = 20
-  const delayMs = 1000
+  const controller = new AbortController()
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    try {
-      await runPgDumpOnce(container, username, dbName, password, filePath)
-      break
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      const transient = TRANSIENT_ERROR_PATTERN.test(message)
+  const timeoutHandle = setTimeout(() => {
+    controller.abort()
+  }, timeoutMs)
 
-      if (!transient || attempt === maxAttempts) {
-        throw error
+  try {
+    const container = await getDatabaseContainer(
+      getContainerName(databaseName),
+      controller.signal,
+    )
+
+    if (!container) {
+      throw new Error(
+        `Le container de la base "${databaseName}" est introuvable.`,
+      )
+    }
+
+    const inspect = await container.inspect({
+      abortSignal: controller.signal,
+    })
+
+    if (!inspect.State?.Running) {
+      throw new Error(
+        "La base doit être en ligne pour être sauvegardée.",
+      )
+    }
+
+    const env = parseContainerEnv(inspect.Config?.Env)
+    const username = env.POSTGRES_USER
+    const dbName = env.POSTGRES_DB
+    const password = env.POSTGRES_PASSWORD
+
+    if (!username || !dbName || !password) {
+      throw new Error(
+        "Configuration de la base introuvable sur le container.",
+      )
+    }
+
+    const dir = getBackupDir(databaseName)
+    await mkdir(dir, { recursive: true })
+
+    const filename = generateFilename()
+    const filePath = path.join(dir, filename)
+
+    /*
+     * Un container "Running" ne veut pas dire que la base cible est
+     * déjà utilisable (voir TRANSIENT_ERROR_PATTERN ci-dessus) : sur
+     * une base tout juste créée, `pg_dump` peut échouer plusieurs fois
+     * de suite avant que l'instance finale de Postgres soit prête. On
+     * retente uniquement sur ce type d'erreur précis — mais TOUJOURS
+     * dans la limite du budget global ci-dessus, jamais au-delà.
+     */
+    const maxAttempts = 20
+    const delayMs = 1000
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      if (controller.signal.aborted) {
+        throw new BackupTimeoutError(
+          `pg_dump a dépassé le délai maximal de ${timeoutMs / 60_000} minutes et a été annulé.`,
+        )
       }
 
-      await sleep(delayMs)
+      try {
+        await runPgDumpOnce(
+          container,
+          username,
+          dbName,
+          password,
+          filePath,
+          controller.signal,
+        )
+        break
+      } catch (error) {
+        if (
+          error instanceof BackupTimeoutError ||
+          controller.signal.aborted
+        ) {
+          throw new BackupTimeoutError(
+            `pg_dump a dépassé le délai maximal de ${timeoutMs / 60_000} minutes et a été annulé.`,
+          )
+        }
+
+        const message =
+          error instanceof Error ? error.message : String(error)
+        const transient = TRANSIENT_ERROR_PATTERN.test(message)
+
+        if (!transient || attempt === maxAttempts) {
+          throw error
+        }
+
+        await sleepAbortable(delayMs, controller.signal)
+      }
     }
-  }
 
-  const stats = await stat(filePath)
+    const stats = await stat(filePath)
 
-  return {
-    filename,
-    sizeBytes: stats.size,
+    return {
+      filename,
+      sizeBytes: stats.size,
+    }
+  } finally {
+    clearTimeout(timeoutHandle)
   }
 }
 

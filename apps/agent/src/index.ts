@@ -40,10 +40,11 @@ import {
 import { createDatabaseController } from "./controllers/databases.js"
 
 import {
-  createBackup,
   deleteBackupFile,
   getBackupFilePath,
 } from "./services/backup.js"
+
+import { createBackupController } from "./controllers/backups.js"
 
 import {
   requireAgentToken,
@@ -1160,47 +1161,33 @@ app.post(
   "/databases/:name/backups",
   requireAgentToken,
   async (c) => {
-    try {
-      const name =
-        c.req.param("name")
+    const name =
+      c.req.param("name")
 
-      if (!name) {
-        return c.json(
-          {
-            status: "error",
-            message:
-              "Nom de la base manquant.",
-          },
-          400,
-        )
-      }
-
-      const backup =
-        await createBackup(
-          name,
-        )
-
-      return c.json({
-        status: "ok",
-        backup,
-      })
-    } catch (error) {
-      console.error(
-        "POST /databases/:name/backups error:",
-        error,
-      )
-
+    if (!name) {
       return c.json(
         {
           status: "error",
           message:
-            error instanceof Error
-              ? error.message
-              : "Impossible de créer la sauvegarde.",
+            "Nom de la base manquant.",
         },
-        500,
+        400,
       )
     }
+
+    const result =
+      await createBackupController(
+        c.req.raw,
+        name,
+      )
+
+    if (result.response) {
+      return result.response
+    }
+
+    return c.json(
+      result.data,
+    )
   },
 )
 

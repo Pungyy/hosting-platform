@@ -1,9 +1,18 @@
 import { NextResponse } from "next/server"
 
 import { requireSession } from "@/lib/auth/guard"
-import { createAgentDatabaseBackup } from "@/lib/agent/client"
+import {
+  AgentRequestError,
+  createAgentDatabaseBackup,
+  deleteAgentDatabaseBackup,
+} from "@/lib/agent/client"
 import { query } from "@/lib/database"
 import { apiErrorResponse } from "@/lib/http/api-error"
+import {
+  acquireBackupLock,
+  markBackupFailed,
+  markBackupSuccess,
+} from "@/lib/resources/backups"
 import { getOwnedDatabase } from "@/lib/resources/databases"
 
 type RouteContext = {
@@ -102,16 +111,20 @@ export async function POST(
     )
     if (ownedError) return ownedError
 
-    const insertResult = await query<{ id: string }>(
-      `
-        INSERT INTO backups (database_id, server_id, filename, status)
-        VALUES ($1, $2, '', 'creating')
-        RETURNING id
-      `,
-      [database.id, database.server_id],
+    /*
+     * Verrou "une seule sauvegarde 'creating' à la fois" + quota de
+     * 10 sauvegardes complétées, tous deux vérifiés de façon atomique
+     * ici (finding M2 — voir lib/resources/backups.ts pour le
+     * mécanisme complet, basé sur un index unique Postgres, pas une
+     * simple vérification applicative).
+     */
+    const lock = await acquireBackupLock(
+      database.id,
+      database.server_id,
     )
+    if (lock.response) return lock.response
 
-    backupId = insertResult.rows[0].id
+    backupId = lock.backupId
 
     let agentResponse: {
       status?: string
@@ -124,19 +137,24 @@ export async function POST(
         database.name,
       )
     } catch (agentError) {
-      await query(
-        `
-          UPDATE backups
-          SET status = 'failed', error_message = $1
-          WHERE id = $2
-        `,
-        [
-          agentError instanceof Error
+      /*
+       * Signal explicite de timeout (finding M2, même mécanisme que
+       * H1) plutôt qu'un message générique — distingue un pg_dump
+       * réellement annulé pour dépassement du délai de sécurité d'un
+       * échec normal.
+       */
+      const isAgentTimeout =
+        agentError instanceof AgentRequestError &&
+        agentError.data.timeout === true
+
+      await markBackupFailed(
+        backupId,
+        isAgentTimeout
+          ? "Sauvegarde annulée : délai de sécurité dépassé côté Agent."
+          : agentError instanceof Error
             ? agentError.message
             : "L'Agent a refusé la sauvegarde.",
-          backupId,
-        ],
-      )
+      ).catch(() => {})
 
       return apiErrorResponse(
         agentError,
@@ -153,15 +171,41 @@ export async function POST(
       )
     }
 
+    const successResult = await markBackupSuccess(backupId, {
+      filename: agentResponse.backup.filename,
+      sizeBytes: agentResponse.backup.sizeBytes,
+    })
+
+    if (!successResult.applied) {
+      /*
+       * Le pg_dump a réellement réussi côté Agent (le fichier existe
+       * sur son disque), mais son suivi a expiré côté Panel avant de
+       * pouvoir l'enregistrer (réclamé comme 'failed' par une autre
+       * requête pendant l'attente) — le fichier serait sinon orphelin
+       * : invisible dans l'UI, jamais comptabilisé dans le quota,
+       * jamais nettoyable manuellement. Nettoyage best-effort côté
+       * Agent plutôt que de laisser fuir de l'espace disque en
+       * silence (finding M2, le risque même que ce chantier corrige).
+       */
+      await deleteAgentDatabaseBackup(
+        database.server_id,
+        database.name,
+        agentResponse.backup.filename,
+      ).catch(() => {})
+
+      return NextResponse.json(
+        {
+          status: "error",
+          message:
+            "La sauvegarde a été créée avec succès sur le serveur, mais son suivi a expiré côté Panel avant l'enregistrement final (délai de sécurité dépassé). Veuillez réessayer.",
+        },
+        { status: 409 },
+      )
+    }
+
     const finalResult = await query<BackupRow>(
       `
-        UPDATE backups
-        SET
-          filename = $1,
-          size_bytes = $2,
-          status = 'completed'
-        WHERE id = $3
-        RETURNING
+        SELECT
           id,
           database_id,
           filename,
@@ -169,12 +213,10 @@ export async function POST(
           status,
           error_message,
           created_at
+        FROM backups
+        WHERE id = $1
       `,
-      [
-        agentResponse.backup.filename,
-        agentResponse.backup.sizeBytes,
-        backupId,
-      ],
+      [backupId],
     )
 
     return NextResponse.json(
@@ -183,18 +225,11 @@ export async function POST(
     )
   } catch (error) {
     if (backupId) {
-      await query(
-        `
-          UPDATE backups
-          SET status = 'failed', error_message = $1
-          WHERE id = $2
-        `,
-        [
-          error instanceof Error
-            ? error.message
-            : "Impossible de créer la sauvegarde.",
-          backupId,
-        ],
+      await markBackupFailed(
+        backupId,
+        error instanceof Error
+          ? error.message
+          : "Impossible de créer la sauvegarde.",
       ).catch(() => {})
     }
 
