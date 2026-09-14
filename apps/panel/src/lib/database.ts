@@ -29,10 +29,4 @@ export type Queryer = {
   ): Promise<{ rows: T[]; rowCount: number | null }>
 }
 
-export async function checkDatabaseConnection() {
-  const result = await pool.query("SELECT NOW()")
-
-  return result.rows[0]
-}
-
 export { pool }

@@ -1,8 +1,13 @@
 import { NextResponse } from "next/server"
 
+import { requireSession } from "@/lib/auth/guard"
+
 const AGENT_URL = "http://localhost:4000"
 
 export async function GET() {
+  const { response: authError } = await requireSession()
+  if (authError) return authError
+
   try {
     const response = await fetch(`${AGENT_URL}/health`, {
       cache: "no-store",
