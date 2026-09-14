@@ -10,6 +10,11 @@ import {
 } from "@/lib/agent/client"
 import { query } from "@/lib/database"
 import { ApiError, apiErrorResponse } from "@/lib/http/api-error"
+import {
+  MAX_SITES_PER_USER,
+  releaseResourceQuota,
+  reserveResourceQuota,
+} from "@/lib/resources/quotas"
 
 const createSiteSchema = z.object({
   name: z
@@ -245,6 +250,16 @@ export async function GET(request: Request) {
  * Création d'un site sur le premier serveur joignable.
  */
 export async function POST(request: Request) {
+  /*
+   * Finding M3-1 (audit sécurité) — suit l'utilisateur pour lequel un
+   * slot de quota a été réservé, afin que le catch englobant puisse le
+   * libérer sur toute erreur inattendue survenant après la réservation
+   * (voir lib/resources/quotas.ts). Remis à `null` dès qu'une
+   * libération explicite a déjà eu lieu, pour ne jamais libérer deux
+   * fois le même slot.
+   */
+  let quotaOwnerId: string | null = null
+
   try {
     const { session, response: authError } = await requireSession()
     if (authError) return authError
@@ -265,6 +280,20 @@ export async function POST(request: Request) {
     }
 
     const { name } = parsed.data
+
+    /*
+     * Quota par tenant (finding M3-1) : réservé AVANT tout appel
+     * Agent, pour ne jamais créer un container si le quota est déjà
+     * atteint. Voir lib/resources/quotas.ts pour la garantie de
+     * concurrence.
+     */
+    const quotaResult = await reserveResourceQuota(
+      session.user_id,
+      "site",
+      MAX_SITES_PER_USER,
+    )
+    if (quotaResult.response) return quotaResult.response
+    quotaOwnerId = session.user_id
 
     /*
      * Choix du serveur : le plus ancien qui soit contactable — Agent
@@ -288,6 +317,8 @@ export async function POST(request: Request) {
     )
 
     if (serverResult.rows.length === 0) {
+      await releaseResourceQuota(session.user_id, "site")
+      quotaOwnerId = null
       return NextResponse.json(
         {
           status: "error",
@@ -305,6 +336,8 @@ export async function POST(request: Request) {
     )
 
     if (existingSite.rows.length > 0) {
+      await releaseResourceQuota(session.user_id, "site")
+      quotaOwnerId = null
       return NextResponse.json(
         {
           status: "error",
@@ -334,6 +367,8 @@ export async function POST(request: Request) {
 
       agentSite = agentResponse.site
     } catch (agentError) {
+      await releaseResourceQuota(session.user_id, "site")
+      quotaOwnerId = null
       return apiErrorResponse(
         agentError,
         "POST /api/sites (agent) error:",
@@ -396,6 +431,9 @@ export async function POST(request: Request) {
         databaseError,
       )
 
+      await releaseResourceQuota(session.user_id, "site")
+      quotaOwnerId = null
+
       /*
        * Nettoyage best-effort du container orphelin.
        */
@@ -416,6 +454,17 @@ export async function POST(request: Request) {
       )
     }
   } catch (error) {
+    if (quotaOwnerId) {
+      await releaseResourceQuota(quotaOwnerId, "site").catch(
+        (releaseError) => {
+          console.error(
+            "POST /api/sites — libération du quota impossible :",
+            releaseError,
+          )
+        },
+      )
+    }
+
     return apiErrorResponse(
       error,
       "POST /api/sites error:",

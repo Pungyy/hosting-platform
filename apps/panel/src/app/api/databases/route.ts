@@ -11,6 +11,11 @@ import {
 import { encryptSecret } from "@/lib/agent/crypto"
 import { query } from "@/lib/database"
 import { ApiError, apiErrorResponse } from "@/lib/http/api-error"
+import {
+  MAX_DATABASES_PER_USER,
+  releaseResourceQuota,
+  reserveResourceQuota,
+} from "@/lib/resources/quotas"
 
 const createDatabaseSchema = z.object({
   name: z
@@ -234,6 +239,12 @@ export async function GET(request: Request) {
  * contactable.
  */
 export async function POST(request: Request) {
+  /*
+   * Finding M3-1 (audit sécurité) — voir le commentaire équivalent
+   * dans app/api/sites/route.ts pour le raisonnement complet.
+   */
+  let quotaOwnerId: string | null = null
+
   try {
     const { response: authError, session } = await requireSession()
     if (authError) return authError
@@ -255,12 +266,26 @@ export async function POST(request: Request) {
 
     const { name, engine } = parsed.data
 
+    /*
+     * Quota par tenant (finding M3-1) : réservé AVANT tout appel
+     * Agent — voir lib/resources/quotas.ts.
+     */
+    const quotaResult = await reserveResourceQuota(
+      session.user_id,
+      "database",
+      MAX_DATABASES_PER_USER,
+    )
+    if (quotaResult.response) return quotaResult.response
+    quotaOwnerId = session.user_id
+
     const existing = await query<{ id: string }>(
       `SELECT id FROM databases WHERE name = $1 LIMIT 1`,
       [name],
     )
 
     if (existing.rows.length > 0) {
+      await releaseResourceQuota(session.user_id, "database")
+      quotaOwnerId = null
       return NextResponse.json(
         {
           status: "error",
@@ -285,6 +310,8 @@ export async function POST(request: Request) {
     )
 
     if (serverResult.rows.length === 0) {
+      await releaseResourceQuota(session.user_id, "database")
+      quotaOwnerId = null
       return NextResponse.json(
         {
           status: "error",
@@ -322,6 +349,8 @@ export async function POST(request: Request) {
 
       created = agentResponse.database
     } catch (agentError) {
+      await releaseResourceQuota(session.user_id, "database")
+      quotaOwnerId = null
       return apiErrorResponse(
         agentError,
         "POST /api/databases (agent) error:",
@@ -389,6 +418,9 @@ export async function POST(request: Request) {
         databaseError,
       )
 
+      await releaseResourceQuota(session.user_id, "database")
+      quotaOwnerId = null
+
       await deleteAgentDatabase(serverId, name).catch(
         (cleanupError) => {
           console.error(
@@ -408,6 +440,17 @@ export async function POST(request: Request) {
       )
     }
   } catch (error) {
+    if (quotaOwnerId) {
+      await releaseResourceQuota(quotaOwnerId, "database").catch(
+        (releaseError) => {
+          console.error(
+            "POST /api/databases — libération du quota impossible :",
+            releaseError,
+          )
+        },
+      )
+    }
+
     return apiErrorResponse(
       error,
       "POST /api/databases error:",
