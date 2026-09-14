@@ -1,9 +1,13 @@
 import { NextResponse } from "next/server"
 
-import { deployAgentSite } from "@/lib/agent/client"
+import { AgentRequestError, deployAgentSite } from "@/lib/agent/client"
 import { requireSession } from "@/lib/auth/guard"
 import { query } from "@/lib/database"
 import { apiErrorResponse } from "@/lib/http/api-error"
+import {
+  acquireDeploymentLock,
+  markDeploymentTerminal,
+} from "@/lib/resources/deployments"
 import { getOwnedSite } from "@/lib/resources/sites"
 
 type RouteContext = {
@@ -68,35 +72,15 @@ export async function POST(
       "main"
 
     /*
-     * Création du deployment en base.
+     * Verrou : un seul déploiement 'running' à la fois par site
+     * (finding H1 — voir lib/resources/deployments.ts pour le
+     * mécanisme complet, basé sur un index unique Postgres, pas une
+     * simple vérification applicative).
      */
-    const deploymentResult =
-      await query<{
-        id: string
-      }>(
-        `
-          INSERT INTO deployments (
-            site_id,
-            branch,
-            status,
-            started_at
-          )
-          VALUES (
-            $1,
-            $2,
-            'running',
-            NOW()
-          )
-          RETURNING id
-        `,
-        [
-          site.id,
-          branch,
-        ],
-      )
+    const lock = await acquireDeploymentLock(site.id, branch)
+    if (lock.response) return lock.response
 
-    deploymentId =
-      deploymentResult.rows[0].id
+    deploymentId = lock.deploymentId
 
     /*
      * Déploiement sur l'Agent du serveur
@@ -215,28 +199,25 @@ export async function POST(
     })
   } catch (error) {
     /*
-     * Si le deployment existe déjà,
-     * on le marque comme failed.
+     * Si le deployment existe déjà, on le marque comme terminé —
+     * 'cancelled' si l'Agent a explicitement signalé une annulation
+     * pour dépassement du délai de sécurité côté build (finding H1,
+     * voir apps/agent/src/services/deployment.ts), 'failed' sinon.
+     * Dans les deux cas, le verrou (index unique partiel) est libéré.
      */
     if (deploymentId) {
-      await query(
-        `
-          UPDATE deployments
-          SET
-            status = 'failed',
-            finished_at = NOW(),
-            logs = COALESCE(logs, '') || $1
-          WHERE id = $2
-        `,
-        [
-          `\n\nErreur: ${
-            error instanceof Error
-              ? error.message
-              : "Erreur inconnue."
-          }`,
+      const isAgentTimeout =
+        error instanceof AgentRequestError &&
+        error.data.timeout === true
 
-          deploymentId,
-        ],
+      await markDeploymentTerminal(
+        deploymentId,
+        isAgentTimeout ? "cancelled" : "failed",
+        `\n\nErreur: ${
+          error instanceof Error
+            ? error.message
+            : "Erreur inconnue."
+        }`,
       ).catch(
         (databaseError) => {
           console.error(

@@ -1,6 +1,7 @@
 import { z } from "zod"
 
 import {
+  DeploymentTimeoutError,
   deployDeployment,
 } from "../services/deployment.js"
 
@@ -92,6 +93,36 @@ export async function buildDeploymentController(
       "Build deployment error:",
       error,
     )
+
+    /*
+     * Signal explicite (`timeout: true`) plutôt qu'un texte à
+     * interpréter — voir lib/agent/client.ts:AgentRequestError côté
+     * Panel, qui s'en sert pour marquer le deployment 'cancelled' au
+     * lieu de 'failed'. 504 (Gateway Timeout) : l'Agent a bien
+     * répondu, mais l'opération en aval (le build) a dépassé son
+     * délai — distinct d'un 500 (échec de build réel).
+     */
+    if (
+      error instanceof
+      DeploymentTimeoutError
+    ) {
+      return {
+        response: new Response(
+          JSON.stringify({
+            status: "error",
+            message: error.message,
+            timeout: true,
+          }),
+          {
+            status: 504,
+            headers: {
+              "Content-Type":
+                "application/json",
+            },
+          },
+        ),
+      }
+    }
 
     return {
       response: new Response(

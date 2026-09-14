@@ -8,6 +8,26 @@ type AgentResponse = {
   [key: string]: unknown
 }
 
+/*
+ * Erreur levée quand l'Agent répond avec un statut HTTP non-2xx.
+ * Conserve le corps JSON complet de sa réponse (`data`) — notamment le
+ * champ `timeout` que l'Agent positionne quand un build de déploiement
+ * a été annulé pour dépassement du délai de sécurité (finding H1) —
+ * pour que l'appelant puisse distinguer un timeout d'un échec réel
+ * sans avoir à analyser le texte du message.
+ */
+export class AgentRequestError extends Error {
+  readonly status: number
+  readonly data: AgentResponse
+
+  constructor(message: string, status: number, data: AgentResponse) {
+    super(message)
+    this.name = "AgentRequestError"
+    this.status = status
+    this.data = data
+  }
+}
+
 type ServerAgentConfig = {
   agent_url: string | null
   agent_token_encrypted: string | null
@@ -198,9 +218,11 @@ async function agentRequest<T = AgentResponse>(
   }
 
   if (!response.ok) {
-    throw new Error(
+    throw new AgentRequestError(
       data.message ??
         `L'Agent a retourné HTTP ${response.status}.`,
+      response.status,
+      data,
     )
   }
 

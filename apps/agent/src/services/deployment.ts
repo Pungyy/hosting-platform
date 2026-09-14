@@ -67,6 +67,80 @@ class DeploymentBuildError extends Error {
   }
 }
 
+/*
+ * Levée quand le build est annulé pour dépassement du délai de
+ * sécurité (finding H1) — distincte de DeploymentBuildError pour que
+ * l'appelant (controllers/deployments.ts) puisse répondre au Panel
+ * avec un signal explicite (`timeout: true`) plutôt qu'un simple
+ * message texte à interpréter.
+ */
+export class DeploymentTimeoutError extends Error {
+  logs: string
+
+  constructor(
+    message: string,
+    logs: string,
+  ) {
+    super(message)
+
+    this.name =
+      "DeploymentTimeoutError"
+
+    this.logs = logs
+  }
+}
+
+/*
+ * Limites de ressources du build Docker (finding H1) — cohérentes
+ * avec, mais volontairement plus généreuses que, les limites des
+ * containers en exécution (256 Mo / 0.5 CPU, voir docker.ts :
+ * createSite/createDeploymentContainer) : un build (npm install,
+ * compilation) a besoin de plus de marge que l'application qui
+ * tournera ensuite dans son container final, déjà borné séparément.
+ *
+ * Vérifié avant implémentation (dockerode@5.0.1 installé, lecture du
+ * code source réel) : docker.buildImage() n'active JAMAIS le mode
+ * session BuildKit dans ce projet (déclenché uniquement par
+ * `version: "2"`, jamais passé ici) — ce sont donc les paramètres
+ * historiques de l'API classique `/build` de Docker Engine qui
+ * s'appliquent (memory/memswap en octets, cpuperiod/cpuquota en
+ * microsecondes), documentés et stables depuis longtemps, pas une
+ * fonctionnalité BuildKit susceptible d'être silencieusement ignorée.
+ */
+const BUILD_MEMORY_BYTES =
+  1024 * 1024 * 1024 // 1 Go
+
+const BUILD_MEMSWAP_BYTES =
+  BUILD_MEMORY_BYTES // égal à memory : aucun swap additionnel autorisé
+
+const BUILD_CPU_PERIOD_MICROS =
+  100_000 // 100 ms — période par défaut de Docker
+
+const BUILD_CPU_QUOTA_MICROS =
+  100_000 // = 1.0 CPU sur cette période
+
+/*
+ * Timeout dur du build (finding H1) — nettement inférieur aux 10
+ * minutes du timeout HTTP côté Panel
+ * (apps/panel/src/lib/agent/client.ts:deployAgentSite), pour que
+ * l'Agent ait toujours le temps de répondre avant que le Panel
+ * n'abandonne la connexion.
+ *
+ * Mécanisme d'annulation vérifié avant implémentation (lecture du
+ * code source de dockerode@5.0.1 et docker-modem@5.0.7) :
+ * docker.buildImage() accepte une option `abortSignal` que
+ * docker-modem relaie directement au `signal` natif de
+ * `http.request()` de Node (docker-modem/lib/modem.js). Annuler ce
+ * signal détruit la connexion HTTP Agent -> daemon Docker (pas
+ * seulement Panel -> Agent) : le daemon Docker suit ce contexte
+ * pendant toute la durée du build, y compris une étape RUN en cours,
+ * et l'arrête à la coupure de connexion — c'est le même mécanisme
+ * qu'un Ctrl+C sur `docker build` en CLI, indépendant de BuildKit
+ * (jamais activé ici, voir plus haut).
+ */
+const BUILD_TIMEOUT_MS =
+  8 * 60 * 1000
+
 function createDeploymentId() {
   return crypto.randomUUID()
 }
@@ -374,6 +448,20 @@ export async function buildDeployment({
 
   let buildLogs = ""
 
+  /*
+   * Un AbortController dédié à CE build uniquement — jamais partagé
+   * entre déploiements. Un timeout (ou une annulation) sur ce build
+   * ne peut donc structurellement jamais affecter le build d'un autre
+   * site/tenant (finding H1, exigence d'isolation).
+   */
+  const buildController =
+    new AbortController()
+
+  const buildTimeoutHandle =
+    setTimeout(() => {
+      buildController.abort()
+    }, BUILD_TIMEOUT_MS)
+
   try {
     await ensureDirectory(
       DEPLOYMENT_ROOT,
@@ -444,6 +532,21 @@ export async function buildDeployment({
           pull: true,
 
           rm: true,
+
+          memory:
+            BUILD_MEMORY_BYTES,
+
+          memswap:
+            BUILD_MEMSWAP_BYTES,
+
+          cpuperiod:
+            BUILD_CPU_PERIOD_MICROS,
+
+          cpuquota:
+            BUILD_CPU_QUOTA_MICROS,
+
+          abortSignal:
+            buildController.signal,
         },
       )
 
@@ -626,6 +729,23 @@ export async function buildDeployment({
       imageName,
     )
 
+    /*
+     * Vérifié via buildController.signal.aborted (source de vérité
+     * unique), pas via le message/type de l'erreur reçue : que
+     * l'annulation remonte comme une DeploymentBuildError (rejet du
+     * callback followProgress) ou comme une erreur brute d'abort de
+     * docker.buildImage() lui-même, seul l'état du signal nous
+     * indique de façon certaine que C'EST NOUS qui avons coupé la
+     * connexion pour dépassement du délai — jamais un échec de build
+     * normal.
+     */
+    if (buildController.signal.aborted) {
+      throw new DeploymentTimeoutError(
+        `Le build a dépassé le délai maximal de ${BUILD_TIMEOUT_MS / 60_000} minutes et a été annulé.`,
+        buildLogs,
+      )
+    }
+
     if (
       error instanceof
       DeploymentBuildError
@@ -636,6 +756,10 @@ export async function buildDeployment({
     }
 
     throw error
+  } finally {
+    clearTimeout(
+      buildTimeoutHandle,
+    )
   }
 }
 
