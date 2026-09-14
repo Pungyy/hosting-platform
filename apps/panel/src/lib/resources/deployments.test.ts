@@ -6,10 +6,13 @@ import { AGENT_DEPLOYMENT_TIMEOUT_MS } from "@/lib/agent/client"
 import type { Queryer } from "@/lib/database"
 import {
   acquireDeploymentLock,
+  acquireTenantDeploymentSlot,
   markDeploymentSuccess,
   markDeploymentTerminal,
+  MAX_CONCURRENT_DEPLOYMENTS_PER_TENANT,
   RECLAIM_SAFETY_MARGIN_MS,
   reclaimStaleDeployments,
+  releaseTenantDeploymentSlot,
   STALE_DEPLOYMENT_LOCK_MS,
 } from "@/lib/resources/deployments"
 import {
@@ -46,6 +49,17 @@ async function waitUntilBlocked(pid: number, timeoutMs = 5_000) {
   )
 }
 
+async function tenantSlotCount(
+  db: Queryer,
+  userId: string,
+): Promise<number> {
+  const result = await db.query<{ count: number }>(
+    `SELECT count FROM tenant_deployment_slots WHERE user_id = $1`,
+    [userId],
+  )
+  return result.rows[0]?.count ?? 0
+}
+
 /*
  * Invariant timeout Agent / stale-lock Panel (finding H1, "invariant
  * 8 min / 15 min" — revue indépendante du commit 2054172, §3) :
@@ -80,7 +94,12 @@ describe("acquireDeploymentLock", () => {
         serverId: server.id,
       })
 
-      const result = await acquireDeploymentLock(site.id, "main", db)
+      const result = await acquireDeploymentLock(
+        site.id,
+        owner.id,
+        "main",
+        db,
+      )
 
       expect(result.response).toBeNull()
       expect(result.deploymentId).not.toBeNull()
@@ -96,7 +115,12 @@ describe("acquireDeploymentLock", () => {
         serverId: server.id,
       })
 
-      const first = await acquireDeploymentLock(site.id, "main", db)
+      const first = await acquireDeploymentLock(
+        site.id,
+        owner.id,
+        "main",
+        db,
+      )
       expect(first.response).toBeNull()
 
       /*
@@ -110,7 +134,12 @@ describe("acquireDeploymentLock", () => {
        */
       await db.query("SAVEPOINT before_conflict")
 
-      const second = await acquireDeploymentLock(site.id, "main", db)
+      const second = await acquireDeploymentLock(
+        site.id,
+        owner.id,
+        "main",
+        db,
+      )
 
       expect(second.deploymentId).toBeNull()
       expect(second.response?.status).toBe(409)
@@ -139,7 +168,12 @@ describe("acquireDeploymentLock", () => {
         serverId: server.id,
       })
 
-      const first = await acquireDeploymentLock(site.id, "main", db)
+      const first = await acquireDeploymentLock(
+        site.id,
+        owner.id,
+        "main",
+        db,
+      )
       expect(first.response).toBeNull()
 
       await db.query(
@@ -147,7 +181,12 @@ describe("acquireDeploymentLock", () => {
         [first.deploymentId],
       )
 
-      const second = await acquireDeploymentLock(site.id, "main", db)
+      const second = await acquireDeploymentLock(
+        site.id,
+        owner.id,
+        "main",
+        db,
+      )
       expect(second.response).toBeNull()
       expect(second.deploymentId).not.toBe(first.deploymentId)
     })
@@ -162,7 +201,12 @@ describe("acquireDeploymentLock", () => {
         serverId: server.id,
       })
 
-      const first = await acquireDeploymentLock(site.id, "main", db)
+      const first = await acquireDeploymentLock(
+        site.id,
+        owner.id,
+        "main",
+        db,
+      )
       expect(first.response).toBeNull()
 
       await markDeploymentTerminal(
@@ -172,7 +216,12 @@ describe("acquireDeploymentLock", () => {
         db,
       )
 
-      const second = await acquireDeploymentLock(site.id, "main", db)
+      const second = await acquireDeploymentLock(
+        site.id,
+        owner.id,
+        "main",
+        db,
+      )
       expect(second.response).toBeNull()
     })
   })
@@ -186,7 +235,12 @@ describe("acquireDeploymentLock", () => {
         serverId: server.id,
       })
 
-      const first = await acquireDeploymentLock(site.id, "main", db)
+      const first = await acquireDeploymentLock(
+        site.id,
+        owner.id,
+        "main",
+        db,
+      )
       expect(first.response).toBeNull()
 
       await markDeploymentTerminal(
@@ -196,7 +250,12 @@ describe("acquireDeploymentLock", () => {
         db,
       )
 
-      const second = await acquireDeploymentLock(site.id, "main", db)
+      const second = await acquireDeploymentLock(
+        site.id,
+        owner.id,
+        "main",
+        db,
+      )
       expect(second.response).toBeNull()
 
       const rows = await db.query<{ status: string }>(
@@ -230,7 +289,12 @@ describe("acquireDeploymentLock", () => {
       )
       const staleDeploymentId = staleResult.rows[0].id
 
-      const result = await acquireDeploymentLock(site.id, "main", db)
+      const result = await acquireDeploymentLock(
+        site.id,
+        owner.id,
+        "main",
+        db,
+      )
 
       expect(result.response).toBeNull()
       expect(result.deploymentId).not.toBe(staleDeploymentId)
@@ -252,12 +316,22 @@ describe("acquireDeploymentLock", () => {
         serverId: server.id,
       })
 
-      const first = await acquireDeploymentLock(site.id, "main", db)
+      const first = await acquireDeploymentLock(
+        site.id,
+        owner.id,
+        "main",
+        db,
+      )
       expect(first.response).toBeNull()
 
       // Un deployment démarré il y a seulement quelques secondes ne
       // doit jamais être considéré comme abandonné.
-      const second = await acquireDeploymentLock(site.id, "main", db)
+      const second = await acquireDeploymentLock(
+        site.id,
+        owner.id,
+        "main",
+        db,
+      )
 
       expect(second.deploymentId).toBeNull()
       expect(second.response?.status).toBe(409)
@@ -319,7 +393,12 @@ describe("acquireDeploymentLock", () => {
             query: (text, values) => clientB.query(text, values),
           }
 
-          const resultA = await acquireDeploymentLock(siteId, "main", dbA)
+          const resultA = await acquireDeploymentLock(
+            siteId,
+            userId,
+            "main",
+            dbA,
+          )
           expect(resultA.response).toBeNull()
 
           /*
@@ -327,7 +406,12 @@ describe("acquireDeploymentLock", () => {
            * côté serveur Postgres tant que A n'a pas commit (verrou de
            * ligne posé par l'index unique partiel).
            */
-          const pendingB = acquireDeploymentLock(siteId, "main", dbB)
+          const pendingB = acquireDeploymentLock(
+            siteId,
+            userId,
+            "main",
+            dbB,
+          )
 
           /*
            * Attend une preuve RÉELLE (pg_blocking_pids) que B est bien
@@ -376,6 +460,7 @@ describe("markDeploymentTerminal", () => {
 
       const { deploymentId } = await acquireDeploymentLock(
         site.id,
+        owner.id,
         "main",
         db,
       )
@@ -441,7 +526,7 @@ describe("reclaimStaleDeployments (isolé)", () => {
       )
       const staleDeploymentId = staleResult.rows[0].id
 
-      await reclaimStaleDeployments(site.id, db)
+      await reclaimStaleDeployments(site.id, owner.id, db)
 
       const row = await db.query<{
         status: string
@@ -475,7 +560,7 @@ describe("reclaimStaleDeployments (isolé)", () => {
       )
       const recentDeploymentId = recentResult.rows[0].id
 
-      await reclaimStaleDeployments(site.id, db)
+      await reclaimStaleDeployments(site.id, owner.id, db)
 
       const row = await db.query<{ status: string }>(
         `SELECT status FROM deployments WHERE id = $1`,
@@ -509,7 +594,7 @@ describe("reclaimStaleDeployments (isolé)", () => {
       )
       const successDeploymentId = successResult.rows[0].id
 
-      await reclaimStaleDeployments(site.id, db)
+      await reclaimStaleDeployments(site.id, owner.id, db)
 
       const row = await db.query<{ status: string }>(
         `SELECT status FROM deployments WHERE id = $1`,
@@ -542,6 +627,7 @@ describe("CAS sur les transitions terminales — race réclamation vs réponse f
 
       const { deploymentId } = await acquireDeploymentLock(
         site.id,
+        owner.id,
         "main",
         db,
       )
@@ -601,6 +687,7 @@ describe("CAS sur les transitions terminales — race réclamation vs réponse f
 
       const { deploymentId } = await acquireDeploymentLock(
         site.id,
+        owner.id,
         "main",
         db,
       )
@@ -648,6 +735,7 @@ describe("CAS sur les transitions terminales — race réclamation vs réponse f
 
       const { deploymentId } = await acquireDeploymentLock(
         site.id,
+        owner.id,
         "main",
         db,
       )
@@ -677,6 +765,280 @@ describe("CAS sur les transitions terminales — race réclamation vs réponse f
 
       expect(row.rows[0].status).toBe("success")
       expect(row.rows[0].image_name).toBe("hosting/demo:x")
+    })
+  })
+})
+
+/*
+ * Finding M3-2 (audit sécurité) — plafond de deployments 'running'
+ * simultanés par tenant, en plus du verrou H1 (1 par site). Compteur
+ * séparé de user_resource_quotas (M3-1) : reflète EXCLUSIVEMENT les
+ * deployments actuellement 'running', jamais un total historique.
+ */
+describe(`acquireTenantDeploymentSlot / releaseTenantDeploymentSlot (limite = ${MAX_CONCURRENT_DEPLOYMENTS_PER_TENANT}, finding M3-2)`, () => {
+  it("tenant à 0 deployment running -> le 1er est autorisé", async () => {
+    await withTestTransaction(async (db) => {
+      const owner = await createTestUser(db)
+
+      const result = await acquireTenantDeploymentSlot(owner.id, db)
+
+      expect(result.acquired).toBe(true)
+      expect(await tenantSlotCount(db, owner.id)).toBe(1)
+    })
+  })
+
+  it("tenant à 1 deployment running -> le 2e est autorisé (atteint la limite)", async () => {
+    await withTestTransaction(async (db) => {
+      const owner = await createTestUser(db)
+
+      const first = await acquireTenantDeploymentSlot(owner.id, db)
+      expect(first.acquired).toBe(true)
+
+      const second = await acquireTenantDeploymentSlot(owner.id, db)
+      expect(second.acquired).toBe(true)
+
+      expect(await tenantSlotCount(db, owner.id)).toBe(
+        MAX_CONCURRENT_DEPLOYMENTS_PER_TENANT,
+      )
+    })
+  })
+
+  it(`tenant à ${MAX_CONCURRENT_DEPLOYMENTS_PER_TENANT} deployments running -> le suivant est refusé (409)`, async () => {
+    await withTestTransaction(async (db) => {
+      const owner = await createTestUser(db)
+
+      for (let i = 0; i < MAX_CONCURRENT_DEPLOYMENTS_PER_TENANT; i += 1) {
+        const result = await acquireTenantDeploymentSlot(owner.id, db)
+        expect(result.acquired).toBe(true)
+      }
+
+      const refused = await acquireTenantDeploymentSlot(owner.id, db)
+
+      expect(refused.acquired).toBe(false)
+      expect(refused.response?.status).toBe(409)
+      expect(await tenantSlotCount(db, owner.id)).toBe(
+        MAX_CONCURRENT_DEPLOYMENTS_PER_TENANT,
+      )
+    })
+  })
+
+  it("releaseTenantDeploymentSlot libère un slot, permettant une nouvelle acquisition ensuite", async () => {
+    await withTestTransaction(async (db) => {
+      const owner = await createTestUser(db)
+
+      for (let i = 0; i < MAX_CONCURRENT_DEPLOYMENTS_PER_TENANT; i += 1) {
+        await acquireTenantDeploymentSlot(owner.id, db)
+      }
+
+      const refused = await acquireTenantDeploymentSlot(owner.id, db)
+      expect(refused.acquired).toBe(false)
+
+      await releaseTenantDeploymentSlot(owner.id, db)
+
+      const afterRelease = await acquireTenantDeploymentSlot(owner.id, db)
+      expect(afterRelease.acquired).toBe(true)
+      expect(await tenantSlotCount(db, owner.id)).toBe(
+        MAX_CONCURRENT_DEPLOYMENTS_PER_TENANT,
+      )
+    })
+  })
+
+  it("deux tenants indépendants : chacun obtient ses propres slots, sans se bloquer mutuellement", async () => {
+    await withTestTransaction(async (db) => {
+      const tenantA = await createTestUser(db)
+      const tenantB = await createTestUser(db)
+
+      for (let i = 0; i < MAX_CONCURRENT_DEPLOYMENTS_PER_TENANT; i += 1) {
+        const resultA = await acquireTenantDeploymentSlot(tenantA.id, db)
+        expect(resultA.acquired).toBe(true)
+      }
+
+      const refusedA = await acquireTenantDeploymentSlot(tenantA.id, db)
+      expect(refusedA.acquired).toBe(false)
+
+      const resultB = await acquireTenantDeploymentSlot(tenantB.id, db)
+      expect(resultB.acquired).toBe(true)
+      expect(await tenantSlotCount(db, tenantB.id)).toBe(1)
+    })
+  })
+
+  it(
+    "deux acquisitions réellement concurrentes (deux connexions Postgres distinctes) avec 1 slot restant -> une seule réussit, jamais plus de la limite",
+    async () => {
+      const email = `deploy-slot-race-${randomUUID()}@fixtures.internal`
+      const userResult = await testPool.query<{ id: string }>(
+        `INSERT INTO users (email, name, role) VALUES ($1, $2, 'user') RETURNING id`,
+        [email, "Slot Race Fixture"],
+      )
+      const userId = userResult.rows[0].id
+
+      try {
+        /*
+         * Pré-remplit le compteur à (limite - 1), en dehors de toute
+         * transaction ouverte — pour que les deux connexions A/B
+         * ci-dessous se disputent réellement le DERNIER slot restant.
+         */
+        await testPool.query(
+          `
+            INSERT INTO tenant_deployment_slots (user_id, count)
+            VALUES ($1, $2)
+          `,
+          [userId, MAX_CONCURRENT_DEPLOYMENTS_PER_TENANT - 1],
+        )
+
+        const clientA = await testPool.connect()
+        const clientB = await testPool.connect()
+
+        try {
+          await clientA.query("BEGIN")
+          await clientB.query("BEGIN")
+
+          const pidBResult = await clientB.query<{ pid: number }>(
+            "SELECT pg_backend_pid() AS pid",
+          )
+          const pidB = pidBResult.rows[0].pid
+
+          const dbA: Queryer = {
+            query: (text, values) => clientA.query(text, values),
+          }
+          const dbB: Queryer = {
+            query: (text, values) => clientB.query(text, values),
+          }
+
+          const resultA = await acquireTenantDeploymentSlot(userId, dbA)
+          expect(resultA.acquired).toBe(true)
+
+          const pendingB = acquireTenantDeploymentSlot(userId, dbB)
+
+          await waitUntilBlocked(pidB)
+
+          await clientA.query("COMMIT")
+
+          const resultB = await pendingB
+
+          expect(resultB.acquired).toBe(false)
+          expect(resultB.response?.status).toBe(409)
+
+          await clientB.query("ROLLBACK")
+        } finally {
+          clientA.release()
+          clientB.release()
+        }
+
+        const finalCount = await testPool.query<{ count: number }>(
+          `SELECT count FROM tenant_deployment_slots WHERE user_id = $1`,
+          [userId],
+        )
+        expect(finalCount.rows[0].count).toBe(
+          MAX_CONCURRENT_DEPLOYMENTS_PER_TENANT,
+        )
+      } finally {
+        await testPool.query(
+          `DELETE FROM tenant_deployment_slots WHERE user_id = $1`,
+          [userId],
+        )
+        await testPool.query(`DELETE FROM users WHERE id = $1`, [userId])
+      }
+    },
+    10_000,
+  )
+})
+
+/*
+ * Finding M3-2 — reclaimStaleDeployments est la SEULE façon dont un
+ * deployment peut quitter 'running' sans que le code de la requête qui
+ * l'a créé ne s'exécute (celle-ci peut être bloquée indéfiniment sur
+ * un appel Agent mort) : elle doit donc libérer elle-même le slot
+ * tenant correspondant, sinon le compteur resterait indéfiniment
+ * incohérent avec la réalité pour ce cas précis.
+ */
+describe("reclaimStaleDeployments libère le slot tenant (finding M3-2)", () => {
+  it("réclame un deployment 'running' stale ET libère son slot tenant", async () => {
+    await withTestTransaction(async (db) => {
+      const owner = await createTestUser(db)
+      const server = await createTestServer(db)
+      const site = await createTestSite(db, {
+        userId: owner.id,
+        serverId: server.id,
+      })
+
+      // Simule un deployment qui, au moment de son acquisition, avait
+      // réellement réservé un slot tenant.
+      const slot = await acquireTenantDeploymentSlot(owner.id, db)
+      expect(slot.acquired).toBe(true)
+
+      const staleStartedAt = new Date(
+        Date.now() - STALE_DEPLOYMENT_LOCK_MS - 60_000,
+      )
+      await db.query(
+        `
+          INSERT INTO deployments (site_id, branch, status, started_at)
+          VALUES ($1, 'main', 'running', $2)
+        `,
+        [site.id, staleStartedAt],
+      )
+
+      expect(await tenantSlotCount(db, owner.id)).toBe(1)
+
+      await reclaimStaleDeployments(site.id, owner.id, db)
+
+      expect(await tenantSlotCount(db, owner.id)).toBe(0)
+    })
+  })
+
+  it("ne touche PAS le compteur quand il n'y a rien à réclamer (deployment récent)", async () => {
+    await withTestTransaction(async (db) => {
+      const owner = await createTestUser(db)
+      const server = await createTestServer(db)
+      const site = await createTestSite(db, {
+        userId: owner.id,
+        serverId: server.id,
+      })
+
+      await acquireTenantDeploymentSlot(owner.id, db)
+
+      await db.query(
+        `
+          INSERT INTO deployments (site_id, branch, status, started_at)
+          VALUES ($1, 'main', 'running', NOW())
+        `,
+        [site.id],
+      )
+
+      await reclaimStaleDeployments(site.id, owner.id, db)
+
+      // Le deployment récent n'a pas été réclamé -> le slot doit
+      // rester détenu, jamais libéré à tort.
+      expect(await tenantSlotCount(db, owner.id)).toBe(1)
+    })
+  })
+
+  it("ne touche jamais le compteur pour un deployment déjà terminal (même ancien)", async () => {
+    await withTestTransaction(async (db) => {
+      const owner = await createTestUser(db)
+      const server = await createTestServer(db)
+      const site = await createTestSite(db, {
+        userId: owner.id,
+        serverId: server.id,
+      })
+
+      const staleStartedAt = new Date(
+        Date.now() - STALE_DEPLOYMENT_LOCK_MS - 60_000,
+      )
+      await db.query(
+        `
+          INSERT INTO deployments (site_id, branch, status, started_at, finished_at)
+          VALUES ($1, 'main', 'success', $2, NOW())
+        `,
+        [site.id, staleStartedAt],
+      )
+
+      // Aucun slot n'a été acquis pour ce deployment déjà terminal —
+      // le compteur doit rester à 0, la réclamation ne doit jamais le
+      // faire passer en négatif ni le "libérer" à tort.
+      await reclaimStaleDeployments(site.id, owner.id, db)
+
+      expect(await tenantSlotCount(db, owner.id)).toBe(0)
     })
   })
 })

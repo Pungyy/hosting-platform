@@ -46,6 +46,35 @@ export const RECLAIM_SAFETY_MARGIN_MS = 5 * 60 * 1000
 export const STALE_DEPLOYMENT_LOCK_MS =
   AGENT_DEPLOYMENT_TIMEOUT_MS + RECLAIM_SAFETY_MARGIN_MS
 
+/*
+ * Finding M3-2 (audit sécurité) — plafond de deployments 'running'
+ * SIMULTANÉS par tenant, en plus du verrou H1 (1 par site).
+ *
+ * Le verrou H1 n'a aucune portée cross-site : un tenant possédant
+ * plusieurs sites (jusqu'à 10, finding M3-1) pouvait déclencher un
+ * build (jusqu'à 1 Gio RAM / 1.0 CPU chacun) simultanément sur CHACUN
+ * de ses sites, sans aucune limite — voir migration 014 pour le
+ * raisonnement complet sur le risque (contention mémoire réelle sur
+ * l'hôte Docker partagé, OOM killer pouvant affecter d'autres tenants).
+ *
+ * Compteur SÉPARÉ de user_resource_quotas (M3-1, table
+ * user_resource_quotas) : sémantique différente — celui-ci ne reflète
+ * QUE les deployments ACTUELLEMENT 'running' (jamais un total
+ * historique). Incrémenté uniquement après acquisition RÉUSSIE du
+ * verrou H1 (acquireTenantDeploymentSlot), décrémenté dès que le
+ * deployment quitte réellement 'running' — que ce soit par cette même
+ * requête (succès/échec/timeout) OU par une réclamation de verrou
+ * orphelin déclenchée par une AUTRE requête (reclaimStaleDeployments,
+ * qui libère alors le slot lui-même, voir plus bas : c'est la seule
+ * façon dont un deployment peut quitter 'running' sans que le code de
+ * la requête d'origine ne s'exécute).
+ *
+ * Mécanisme d'atomicité identique à M3-1 : INSERT ... ON CONFLICT DO
+ * UPDATE ... WHERE count < limite RETURNING — jamais un
+ * SELECT COUNT(*) puis INSERT séparé.
+ */
+export const MAX_CONCURRENT_DEPLOYMENTS_PER_TENANT = 2
+
 const DEPLOYMENT_LOCK_CONSTRAINT =
   "idx_deployments_one_running_per_site"
 
@@ -65,6 +94,89 @@ function isDeploymentLockViolation(error: unknown): boolean {
   )
 }
 
+export type AcquireTenantSlotResult =
+  | { acquired: true; response: null }
+  | { acquired: false; response: NextResponse }
+
+/*
+ * Réserve atomiquement un slot de concurrence pour ce tenant — appelée
+ * UNIQUEMENT après acquisition réussie du verrou H1 (voir
+ * acquireDeploymentLock), jamais avant : un site déjà en déploiement
+ * doit renvoyer son 409 propre sans jamais consommer un slot tenant
+ * pour un déploiement qui n'aurait de toute façon pas pu démarrer.
+ *
+ * Même mécanisme que reserveResourceQuota (M3-1, lib/resources/
+ * quotas.ts) : le verrou de ligne Postgres sur `user_id` rend cette
+ * réservation atomique — deux requêtes concurrentes pour le MÊME
+ * tenant sont sérialisées, jamais toutes les deux acceptées au-delà de
+ * MAX_CONCURRENT_DEPLOYMENTS_PER_TENANT.
+ */
+export async function acquireTenantDeploymentSlot(
+  userId: string,
+  db: Queryer = { query },
+): Promise<AcquireTenantSlotResult> {
+  const result = await db.query<{ count: number }>(
+    `
+      INSERT INTO tenant_deployment_slots (user_id, count)
+      VALUES ($1, 1)
+      ON CONFLICT (user_id)
+      DO UPDATE SET
+        count = tenant_deployment_slots.count + 1,
+        updated_at = NOW()
+      WHERE tenant_deployment_slots.count < $2
+      RETURNING count
+    `,
+    [userId, MAX_CONCURRENT_DEPLOYMENTS_PER_TENANT],
+  )
+
+  if ((result.rowCount ?? 0) === 0) {
+    return {
+      acquired: false,
+      response: NextResponse.json(
+        {
+          status: "error",
+          message: `Vous avez déjà ${MAX_CONCURRENT_DEPLOYMENTS_PER_TENANT} déploiements en cours. Attendez qu'un déploiement se termine avant d'en lancer un nouveau.`,
+        },
+        { status: 409 },
+      ),
+    }
+  }
+
+  return { acquired: true, response: null }
+}
+
+/*
+ * Libère un slot de concurrence précédemment acquis. Best-effort,
+ * GREATEST(..., 0) en défense en profondeur (le CHECK count >= 0 de la
+ * table l'empêcherait de toute façon) — jamais un comportement attendu
+ * en fonctionnement normal.
+ *
+ * Appelée depuis DEUX endroits seulement, chacun garantissant qu'elle
+ * n'est déclenchée QU'UNE SEULE FOIS par slot réellement détenu
+ * (jamais un double décrément) :
+ *   1. reclaimStaleDeployments ci-dessous, conditionnée à rowCount > 0
+ *      (elle a réellement réclamé CE deployment) ;
+ *   2. app/api/sites/[id]/deploy/route.ts, conditionnée au flag local
+ *      qui suit si CETTE requête détient encore le slot ET au résultat
+ *      `applied` du CAS terminal (si `applied` est faux, une autre
+ *      requête — typiquement reclaimStaleDeployments — a déjà transitionné
+ *      ce deployment ET déjà libéré son slot : la route ne doit alors
+ *      jamais libérer une seconde fois).
+ */
+export async function releaseTenantDeploymentSlot(
+  userId: string,
+  db: Queryer = { query },
+): Promise<void> {
+  await db.query(
+    `
+      UPDATE tenant_deployment_slots
+      SET count = GREATEST(count - 1, 0), updated_at = NOW()
+      WHERE user_id = $1
+    `,
+    [userId],
+  )
+}
+
 /*
  * Réclamation paresseuse des verrous orphelins (crash/restart du Panel
  * ou de l'Agent avant la mise à jour finale) — isolée dans sa propre
@@ -72,16 +184,28 @@ function isDeploymentLockViolation(error: unknown): boolean {
  * complet d'acquisition (voir deployments.test.ts : la revue
  * indépendante notait que le test précédent ne l'isolait pas
  * réellement).
+ *
+ * `userId` (finding M3-2) : requis pour libérer le slot de
+ * concurrence du TENANT quand cette fonction réclame effectivement un
+ * verrou orphelin — c'est la SEULE façon dont un deployment peut
+ * quitter 'running' sans que le code de la requête qui l'a créé ne
+ * s'exécute (celle-ci peut être bloquée indéfiniment sur un appel
+ * Agent mort). Le WHERE ci-dessous garantit qu'au plus UNE ligne peut
+ * être affectée (au plus un deployment 'running' par site, invariant
+ * H1) : la libération n'est donc jamais faite "en boucle", elle est
+ * conditionnée par rowCount > 0, donc jamais déclenchée pour un site
+ * qui n'avait en réalité rien à réclamer.
  */
 export async function reclaimStaleDeployments(
   siteId: string,
+  userId: string,
   db: Queryer = { query },
 ): Promise<void> {
   const staleThreshold = new Date(
     Date.now() - STALE_DEPLOYMENT_LOCK_MS,
   )
 
-  await db.query(
+  const result = await db.query(
     `
       UPDATE deployments
       SET
@@ -98,6 +222,10 @@ export async function reclaimStaleDeployments(
       staleThreshold,
     ],
   )
+
+  if ((result.rowCount ?? 0) > 0) {
+    await releaseTenantDeploymentSlot(userId, db)
+  }
 }
 
 export type AcquireDeploymentLockResult =
@@ -106,10 +234,11 @@ export type AcquireDeploymentLockResult =
 
 export async function acquireDeploymentLock(
   siteId: string,
+  userId: string,
   branch: string,
   db: Queryer = { query },
 ): Promise<AcquireDeploymentLockResult> {
-  await reclaimStaleDeployments(siteId, db)
+  await reclaimStaleDeployments(siteId, userId, db)
 
   try {
     const result = await db.query<{ id: string }>(

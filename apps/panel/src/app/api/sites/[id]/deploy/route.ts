@@ -6,8 +6,10 @@ import { query } from "@/lib/database"
 import { apiErrorResponse } from "@/lib/http/api-error"
 import {
   acquireDeploymentLock,
+  acquireTenantDeploymentSlot,
   markDeploymentSuccess,
   markDeploymentTerminal,
+  releaseTenantDeploymentSlot,
 } from "@/lib/resources/deployments"
 import { getOwnedSite } from "@/lib/resources/sites"
 
@@ -42,6 +44,17 @@ export async function POST(
   { params }: RouteContext,
 ) {
   let deploymentId: string | null = null
+
+  /*
+   * Finding M3-2 (audit sécurité) — suit le tenant pour lequel un slot
+   * de concurrence a été réservé, afin que le catch englobant puisse
+   * le libérer sur toute erreur inattendue. Remis à `null` dès qu'une
+   * libération explicite a eu lieu (succès OU échec Agent), pour ne
+   * jamais libérer deux fois le même slot — voir
+   * lib/resources/deployments.ts pour le raisonnement complet sur ce
+   * risque de double décrément.
+   */
+  let tenantSlotUserId: string | null = null
 
   try {
     const { session, response: authError } = await requireSession()
@@ -78,10 +91,41 @@ export async function POST(
      * mécanisme complet, basé sur un index unique Postgres, pas une
      * simple vérification applicative).
      */
-    const lock = await acquireDeploymentLock(site.id, branch)
+    const lock = await acquireDeploymentLock(site.id, site.user_id, branch)
     if (lock.response) return lock.response
 
     deploymentId = lock.deploymentId
+
+    /*
+     * Finding M3-2 — plafond de déploiements 'running' SIMULTANÉS par
+     * tenant (en plus du verrou H1 ci-dessus, qui n'a aucune portée
+     * cross-site). Acquis APRÈS le verrou H1, jamais avant : un site
+     * déjà en cours de déploiement doit renvoyer son 409 propre sans
+     * jamais consommer un slot tenant pour un déploiement qui n'aurait
+     * de toute façon pas pu démarrer.
+     *
+     * Si le tenant est déjà à sa limite, ce deployment ne doit JAMAIS
+     * rester 'running' : on le termine immédiatement (CAS, comme tout
+     * autre passage à l'état terminal) avant de répondre, sans jamais
+     * appeler l'Agent ni Docker.
+     */
+    const slot = await acquireTenantDeploymentSlot(site.user_id)
+    if (slot.response) {
+      await markDeploymentTerminal(
+        deploymentId,
+        "failed",
+        "\n\nDéploiement refusé : limite de déploiements simultanés atteinte pour cet utilisateur.",
+      ).catch((databaseError) => {
+        console.error(
+          "POST /api/sites/[id]/deploy — impossible de terminer le deployment refusé pour quota tenant :",
+          databaseError,
+        )
+      })
+
+      return slot.response
+    }
+
+    tenantSlotUserId = site.user_id
 
     /*
      * Déploiement sur l'Agent du serveur
@@ -134,6 +178,28 @@ export async function POST(
           containerId: deployment.container?.id ?? null,
         },
       )
+
+    /*
+     * Libération du slot tenant (finding M3-2) — UNIQUEMENT si CETTE
+     * requête a réellement effectué la transition (`applied`). Si
+     * `applied` est faux, une réclamation de verrou orphelin
+     * (reclaimStaleDeployments) a déjà marqué ce deployment 'failed'
+     * ET déjà libéré son slot pendant que cet appel Agent était encore
+     * en cours — libérer une seconde fois ici décrémenterait à tort le
+     * compteur d'un AUTRE déploiement du même tenant, réellement en
+     * cours.
+     */
+    if (successResult.applied && tenantSlotUserId) {
+      await releaseTenantDeploymentSlot(tenantSlotUserId).catch(
+        (releaseError) => {
+          console.error(
+            "POST /api/sites/[id]/deploy — libération du slot tenant impossible :",
+            releaseError,
+          )
+        },
+      )
+      tenantSlotUserId = null
+    }
 
     /*
      * Synchronisation des informations du site — reflète l'état réel
@@ -217,7 +283,7 @@ export async function POST(
         error instanceof AgentRequestError &&
         error.data.timeout === true
 
-      await markDeploymentTerminal(
+      const terminalResult = await markDeploymentTerminal(
         deploymentId,
         isAgentTimeout ? "cancelled" : "failed",
         `\n\nErreur: ${
@@ -231,8 +297,35 @@ export async function POST(
             "Impossible de mettre à jour le deployment en échec:",
             databaseError,
           )
+
+          return undefined
         },
       )
+
+      /*
+       * Finding M3-2 — libère le slot tenant UNIQUEMENT si (a) cette
+       * requête en détenait bien un (tenantSlotUserId non nul — jamais
+       * le cas si l'erreur est survenue AVANT l'acquisition du slot,
+       * ex. verrou H1 refusé ou site invalide) ET (b) CETTE requête a
+       * réellement effectué la transition terminale (`applied` vrai,
+       * confirmé — pas juste "pas d'exception"). Si markDeploymentTerminal
+       * a échoué (terminalResult undefined) ou a été devancée par une
+       * réclamation de verrou orphelin (`applied` faux), on NE libère
+       * PAS : un slot temporairement perdu (fail-closed) est acceptable,
+       * un double décrément ou un dépassement de la limite ne le sont
+       * jamais.
+       */
+      if (tenantSlotUserId && terminalResult?.applied) {
+        await releaseTenantDeploymentSlot(tenantSlotUserId).catch(
+          (releaseError) => {
+            console.error(
+              "POST /api/sites/[id]/deploy — libération du slot tenant impossible :",
+              releaseError,
+            )
+          },
+        )
+        tenantSlotUserId = null
+      }
     }
 
     return apiErrorResponse(
