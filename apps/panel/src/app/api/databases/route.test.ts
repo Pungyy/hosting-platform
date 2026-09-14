@@ -106,6 +106,13 @@ const AGENT_CREATED_DATABASE = {
 describe("POST /api/databases — quota par tenant (finding M3-1)", () => {
   beforeEach(() => {
     vi.resetAllMocks()
+    /*
+     * Valeurs par défaut réalistes (la vraie fonction retourne
+     * toujours une Promise) — voir le commentaire équivalent dans
+     * sites/route.test.ts.
+     */
+    mockReleaseResourceQuota.mockResolvedValue(undefined)
+    mockDeleteAgentDatabase.mockResolvedValue({ status: "ok" })
   })
 
   it("quota déjà atteint -> 409, l'Agent n'est jamais appelé, aucune requête DB", async () => {
@@ -264,4 +271,24 @@ describe("POST /api/databases — quota par tenant (finding M3-1)", () => {
     expect(response.status).toBe(409)
     expect(mockCreateAgentDatabase).not.toHaveBeenCalled()
   })
+
+  it(
+    "erreur inattendue après réservation (ex. connexion DB perdue sur " +
+      "l'unicité du nom) -> quota libéré via le catch englobant",
+    async () => {
+      mockRequireSession.mockResolvedValue(sessionFor("user"))
+      mockReserveResourceQuota.mockResolvedValue(quotaAvailable())
+      mockQuery.mockRejectedValueOnce(new Error("Connexion perdue."))
+
+      const response = await POST(
+        postRequest({ name: "test-db", engine: "postgres" }),
+      )
+
+      expect(response.status).toBe(500)
+      expect(mockReleaseResourceQuota).toHaveBeenCalledWith(
+        "user-1",
+        "database",
+      )
+    },
+  )
 })

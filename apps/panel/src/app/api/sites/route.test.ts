@@ -5,6 +5,7 @@ const {
   mockRequireSession,
   mockResolveListScope,
   mockQuery,
+  mockPoolConnect,
   mockCreateAgentSite,
   mockDeleteAgentSite,
   mockGetAgentSiteStatuses,
@@ -14,6 +15,7 @@ const {
   mockRequireSession: vi.fn(),
   mockResolveListScope: vi.fn(),
   mockQuery: vi.fn(),
+  mockPoolConnect: vi.fn(),
   mockCreateAgentSite: vi.fn(),
   mockDeleteAgentSite: vi.fn(),
   mockGetAgentSiteStatuses: vi.fn(),
@@ -31,6 +33,7 @@ vi.mock("@/lib/auth/roles", () => ({
 
 vi.mock("@/lib/database", () => ({
   query: mockQuery,
+  pool: { connect: mockPoolConnect },
 }))
 
 vi.mock("@/lib/agent/client", () => ({
@@ -87,9 +90,43 @@ function postRequest(body: unknown) {
   })
 }
 
+/*
+ * Faux client transactionnel (BEGIN/.../COMMIT ou ROLLBACK) — la
+ * propriété transactionnelle réelle (ROLLBACK annule bien les DEUX
+ * INSERT) est prouvée avec un VRAI Postgres dans
+ * route.transaction.test.ts ; ce fichier-ci ne vérifie que le flux de
+ * contrôle de la route (quel appel a lieu, dans quel ordre) avec des
+ * réponses simulées.
+ */
+function makeFakeClient(
+  queryResponses: Array<
+    { resolve: unknown } | { reject: Error }
+  >,
+) {
+  const query = vi.fn()
+
+  for (const response of queryResponses) {
+    if ("reject" in response) {
+      query.mockRejectedValueOnce(response.reject)
+    } else {
+      query.mockResolvedValueOnce(response.resolve)
+    }
+  }
+
+  return { query, release: vi.fn() }
+}
+
 describe("POST /api/sites — quota par tenant (finding M3-1)", () => {
   beforeEach(() => {
     vi.resetAllMocks()
+    /*
+     * Valeurs par défaut réalistes (la vraie fonction retourne
+     * toujours une Promise) — sans elles, tout test atteignant le
+     * catch englobant échouerait sur `.catch()` d'une valeur
+     * `undefined` plutôt que sur l'assertion elle-même.
+     */
+    mockReleaseResourceQuota.mockResolvedValue(undefined)
+    mockDeleteAgentSite.mockResolvedValue({ status: "ok" })
   })
 
   it("quota déjà atteint -> 409, l'Agent n'est jamais appelé, aucune requête DB", async () => {
@@ -113,21 +150,29 @@ describe("POST /api/sites — quota par tenant (finding M3-1)", () => {
         rows: [{ id: "server-1", name: "Local", hostname: "localhost" }],
       }) // choix du serveur
       .mockResolvedValueOnce({ rows: [] }) // unicité du nom
-      .mockResolvedValueOnce({
-        rows: [
-          {
-            id: "site-1",
-            name: "test-site",
-            container_name: "hosting-site-test-site",
-            container_id: "c1",
-            image: "nginx",
-            status: "online",
-            created_at: "2026-01-01T00:00:00.000Z",
-            server_id: "server-1",
-          },
-        ],
-      }) // INSERT sites
-      .mockResolvedValueOnce({ rows: [] }) // INSERT domains
+
+    const client = makeFakeClient([
+      { resolve: undefined }, // BEGIN
+      {
+        resolve: {
+          rows: [
+            {
+              id: "site-1",
+              name: "test-site",
+              container_name: "hosting-site-test-site",
+              container_id: "c1",
+              image: "nginx",
+              status: "online",
+              created_at: "2026-01-01T00:00:00.000Z",
+              server_id: "server-1",
+            },
+          ],
+        },
+      }, // INSERT sites
+      { resolve: { rows: [] } }, // INSERT domains
+      { resolve: undefined }, // COMMIT
+    ])
+    mockPoolConnect.mockResolvedValue(client)
 
     mockCreateAgentSite.mockResolvedValue({
       site: {
@@ -144,6 +189,7 @@ describe("POST /api/sites — quota par tenant (finding M3-1)", () => {
 
     expect(response.status).toBe(201)
     expect(mockReleaseResourceQuota).not.toHaveBeenCalled()
+    expect(client.release).toHaveBeenCalledWith(false)
   })
 
   it("serveur injoignable après réservation -> quota libéré, 503", async () => {
@@ -192,8 +238,8 @@ describe("POST /api/sites — quota par tenant (finding M3-1)", () => {
   })
 
   it(
-    "échec d'insertion BDD après création Agent -> quota libéré ET " +
-      "nettoyage du container orphelin",
+    "échec d'insertion BDD après création Agent -> ROLLBACK, quota " +
+      "libéré ET nettoyage du container orphelin",
     async () => {
       mockRequireSession.mockResolvedValue(sessionFor("user"))
       mockReserveResourceQuota.mockResolvedValue(quotaAvailable())
@@ -202,7 +248,13 @@ describe("POST /api/sites — quota par tenant (finding M3-1)", () => {
           rows: [{ id: "server-1", name: "Local", hostname: "localhost" }],
         })
         .mockResolvedValueOnce({ rows: [] })
-        .mockRejectedValueOnce(new Error("Contrainte violée."))
+
+      const client = makeFakeClient([
+        { resolve: undefined }, // BEGIN
+        { reject: new Error("Contrainte violée.") }, // INSERT sites échoue
+        { resolve: undefined }, // ROLLBACK
+      ])
+      mockPoolConnect.mockResolvedValue(client)
 
       mockCreateAgentSite.mockResolvedValue({
         site: {
@@ -214,11 +266,12 @@ describe("POST /api/sites — quota par tenant (finding M3-1)", () => {
           running: true,
         },
       })
-      mockDeleteAgentSite.mockResolvedValue({ status: "ok" })
 
       const response = await POST(postRequest({ name: "test-site" }))
 
       expect(response.status).toBe(500)
+      expect(client.query).toHaveBeenCalledWith("ROLLBACK")
+      expect(client.release).toHaveBeenCalledWith(false)
       expect(mockReleaseResourceQuota).toHaveBeenCalledWith("user-1", "site")
       expect(mockDeleteAgentSite).toHaveBeenCalledWith(
         "server-1",
@@ -236,4 +289,19 @@ describe("POST /api/sites — quota par tenant (finding M3-1)", () => {
     expect(response.status).toBe(409)
     expect(mockCreateAgentSite).not.toHaveBeenCalled()
   })
+
+  it(
+    "erreur inattendue après réservation (ex. connexion DB perdue sur " +
+      "le choix du serveur) -> quota libéré via le catch englobant",
+    async () => {
+      mockRequireSession.mockResolvedValue(sessionFor("user"))
+      mockReserveResourceQuota.mockResolvedValue(quotaAvailable())
+      mockQuery.mockRejectedValueOnce(new Error("Connexion perdue."))
+
+      const response = await POST(postRequest({ name: "test-site" }))
+
+      expect(response.status).toBe(500)
+      expect(mockReleaseResourceQuota).toHaveBeenCalledWith("user-1", "site")
+    },
+  )
 })

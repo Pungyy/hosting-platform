@@ -8,7 +8,7 @@ import {
   deleteAgentSite,
   getAgentSiteStatuses,
 } from "@/lib/agent/client"
-import { query } from "@/lib/database"
+import { pool, query } from "@/lib/database"
 import { ApiError, apiErrorResponse } from "@/lib/http/api-error"
 import {
   MAX_SITES_PER_USER,
@@ -379,79 +379,134 @@ export async function POST(request: Request) {
 
     const userId = session.user_id
 
+    /*
+     * Finding M3-1 (revue indépendante) — INSERT sites + INSERT domains
+     * doivent être atomiques du point de vue Postgres : avec deux
+     * requêtes séparées via query() (autocommit chacune), un échec du
+     * SEUL INSERT domains (ex. coupure réseau transitoire entre les
+     * deux appels) laissait la ligne sites committée alors que le
+     * catch libérait quand même le quota — count quota pouvait alors
+     * devenir strictement inférieur au nombre réel de sites, ouvrant
+     * la voie à un dépassement réel de la limite. Un vrai client dédié
+     * (pool.connect(), PAS pool.query() répété — sinon rien ne
+     * garantit que les statements utilisent la même connexion) avec
+     * BEGIN/COMMIT/ROLLBACK explicites garantit désormais que soit les
+     * deux lignes existent, soit aucune des deux n'existe.
+     *
+     * L'appel à l'Agent (déjà résolu à ce stade) reste volontairement
+     * EN DEHORS de cette transaction : une opération réseau externe
+     * lente n'a rien à faire à l'intérieur d'une transaction
+     * PostgreSQL, qui retiendrait sinon une connexion du pool pendant
+     * toute sa durée.
+     */
+    const client = await pool.connect()
+    let transactionResolvedCleanly = false
+
     try {
-      const siteResult = await query<SiteRow>(
-        `
-          INSERT INTO sites (
-            user_id,
-            server_id,
+      try {
+        await client.query("BEGIN")
+
+        const siteResult = await client.query<SiteRow>(
+          `
+            INSERT INTO sites (
+              user_id,
+              server_id,
+              name,
+              container_name,
+              container_id,
+              image,
+              status
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            RETURNING
+              id,
+              name,
+              container_name,
+              container_id,
+              image,
+              status,
+              created_at,
+              server_id
+          `,
+          [
+            userId,
+            server.id,
             name,
-            container_name,
-            container_id,
-            image,
-            status
-          )
-          VALUES ($1, $2, $3, $4, $5, $6, $7)
-          RETURNING
-            id,
-            name,
-            container_name,
-            container_id,
-            image,
-            status,
-            created_at,
-            server_id
-        `,
-        [
-          userId,
-          server.id,
-          name,
-          agentSite.containerName,
-          agentSite.id,
-          agentSite.image,
-          agentSite.running ? "online" : "stopped",
-        ],
-      )
-
-      const site = siteResult.rows[0]
-
-      await query(
-        `
-          INSERT INTO domains (site_id, domain, is_primary)
-          VALUES ($1, $2, true)
-          ON CONFLICT DO NOTHING
-        `,
-        [site.id, `${name}.localhost`],
-      )
-
-      return NextResponse.json({ status: "ok", site }, { status: 201 })
-    } catch (databaseError) {
-      console.error(
-        "POST /api/sites — échec BDD après création Agent :",
-        databaseError,
-      )
-
-      await releaseResourceQuota(session.user_id, "site")
-      quotaOwnerId = null
-
-      /*
-       * Nettoyage best-effort du container orphelin.
-       */
-      await deleteAgentSite(server.id, name).catch((cleanupError) => {
-        console.error(
-          "POST /api/sites — nettoyage du container impossible :",
-          cleanupError,
+            agentSite.containerName,
+            agentSite.id,
+            agentSite.image,
+            agentSite.running ? "online" : "stopped",
+          ],
         )
-      })
 
-      return NextResponse.json(
-        {
-          status: "error",
-          message:
-            "Le container a été créé mais son enregistrement en base a échoué.",
-        },
-        { status: 500 },
-      )
+        const site = siteResult.rows[0]
+
+        await client.query(
+          `
+            INSERT INTO domains (site_id, domain, is_primary)
+            VALUES ($1, $2, true)
+            ON CONFLICT DO NOTHING
+          `,
+          [site.id, `${name}.localhost`],
+        )
+
+        await client.query("COMMIT")
+        transactionResolvedCleanly = true
+
+        return NextResponse.json({ status: "ok", site }, { status: 201 })
+      } catch (databaseError) {
+        try {
+          await client.query("ROLLBACK")
+          transactionResolvedCleanly = true
+        } catch (rollbackError) {
+          console.error(
+            "POST /api/sites — ROLLBACK impossible après échec BDD :",
+            rollbackError,
+          )
+        }
+
+        console.error(
+          "POST /api/sites — échec BDD après création Agent :",
+          databaseError,
+        )
+
+        /*
+         * Le ROLLBACK garantit qu'aucune ligne sites/domains ne
+         * subsiste : le slot de quota réservé plus haut peut donc être
+         * rendu en toute sécurité, sans jamais libérer un slot
+         * correspondant à une ressource réellement créée.
+         */
+        await releaseResourceQuota(session.user_id, "site")
+        quotaOwnerId = null
+
+        /*
+         * Nettoyage best-effort du container orphelin.
+         */
+        await deleteAgentSite(server.id, name).catch((cleanupError) => {
+          console.error(
+            "POST /api/sites — nettoyage du container impossible :",
+            cleanupError,
+          )
+        })
+
+        return NextResponse.json(
+          {
+            status: "error",
+            message:
+              "Le container a été créé mais son enregistrement en base a échoué.",
+          },
+          { status: 500 },
+        )
+      }
+    } finally {
+      /*
+       * Si le ROLLBACK lui-même a échoué, la connexion peut être
+       * laissée dans un état de transaction avorté indéterminé —
+       * release(true) la fait détruire par le pool plutôt que
+       * réutiliser, pour ne jamais contaminer une requête ultérieure
+       * sans rapport.
+       */
+      client.release(!transactionResolvedCleanly)
     }
   } catch (error) {
     if (quotaOwnerId) {

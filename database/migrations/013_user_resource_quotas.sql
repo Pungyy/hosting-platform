@@ -58,3 +58,50 @@ SELECT user_id, 'database', COUNT(*)
 FROM databases
 GROUP BY user_id
 ON CONFLICT (user_id, resource_type) DO NOTHING;
+
+-- ============================================================
+-- Reproductibilité de l'environnement de test (revue indépendante)
+-- ============================================================
+--
+-- Constat : contrairement à hosting_platform_user (base de dev/prod,
+-- couvert par l'ALTER DEFAULT PRIVILEGES FOR ROLE regardscroises de la
+-- migration 001), AUCUNE règle de privilèges par défaut n'a jamais
+-- existé pour hosting_platform_test_user dans hosting_platform_test
+-- (vérifié : SELECT * FROM pg_default_acl y renvoie 0 ligne). Chaque
+-- nouvelle table créée par une migration (002 à 012) a donc nécessité
+-- un GRANT manuel hors version, refait ici pour la table de cette
+-- migration ET, de façon permanente, pour toutes les tables futures.
+--
+-- Gardé par current_database() = 'hosting_platform_test' — jamais par
+-- une simple vérification d'existence du rôle : hosting_platform_test_user
+-- existe au niveau du cluster Postgres (les rôles ne sont pas propres à
+-- une base) et serait donc "trouvé" même en exécutant cette migration
+-- contre hosting_platform. Un test d'existence du rôle accorderait par
+-- erreur à hosting_platform_test_user un accès réel aux données de
+-- hosting_platform — exactement la frontière que .env.test.example
+-- documente comme volontairement absente (CONNECT hérité de PUBLIC,
+-- mais aucun privilège sur les tables). Seul current_database() garantit
+-- que ce bloc ne s'exécute JAMAIS ailleurs que dans hosting_platform_test.
+--
+-- GRANT et ALTER DEFAULT PRIVILEGES sont du DDL/DCL : PL/pgSQL exige de
+-- les exécuter via EXECUTE (chaîne dynamique), ils ne peuvent pas être
+-- écrits comme instruction directe dans un bloc DO.
+DO $$
+BEGIN
+    IF current_database() = 'hosting_platform_test' THEN
+        -- Besoin immédiat : la table que cette migration vient de créer.
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ' ||
+                'ON user_resource_quotas ' ||
+                'TO hosting_platform_test_user';
+
+        -- Mécanisme permanent : toute table créée PAR LA SUITE par
+        -- regardscroises dans hosting_platform_test (migrations 014+)
+        -- accorde désormais automatiquement ces privilèges, sans
+        -- nécessiter à nouveau un GRANT manuel hors version.
+        EXECUTE 'ALTER DEFAULT PRIVILEGES FOR ROLE regardscroises ' ||
+                'IN SCHEMA public ' ||
+                'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES ' ||
+                'TO hosting_platform_test_user';
+    END IF;
+END
+$$;
