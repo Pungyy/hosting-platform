@@ -7,6 +7,7 @@ import Docker from "dockerode"
 import { cloneRepository } from "./git.js"
 import {
   createDeploymentContainer,
+  withOperationTimeout,
 } from "./docker.js"
 
 const docker = new Docker()
@@ -120,26 +121,82 @@ const BUILD_CPU_QUOTA_MICROS =
   100_000 // = 1.0 CPU sur cette période
 
 /*
- * Timeout dur du build (finding H1) — nettement inférieur aux 10
- * minutes du timeout HTTP côté Panel
- * (apps/panel/src/lib/agent/client.ts:deployAgentSite), pour que
- * l'Agent ait toujours le temps de répondre avant que le Panel
- * n'abandonne la connexion.
+ * Budget de temps du déploiement (finding H1 — correction "timeout
+ * incomplet" + "invariant 8 min / 15 min").
  *
- * Mécanisme d'annulation vérifié avant implémentation (lecture du
- * code source de dockerode@5.0.1 et docker-modem@5.0.7) :
+ * Le PANEL est l'unique source de vérité sur la durée totale
+ * autorisée pour TOUTE l'opération (build + remplacement du container
+ * + nettoyage), et la transmet explicitement à chaque appel
+ * (`deploymentTimeoutMs`, voir controllers/deployments.ts). Ceci
+ * évite d'avoir deux constantes indépendantes (une côté Agent, une
+ * côté Panel) qui pourraient dériver silencieusement l'une de
+ * l'autre — voir apps/panel/src/lib/resources/deployments.ts, dont le
+ * seuil de réclamation ("stale lock") est dérivé de la même valeur
+ * que celle envoyée ici.
+ *
+ * L'Agent ne fait jamais une confiance illimitée à cette valeur :
+ * DEFAULT_* servent de repli si le champ est absent (rétrocompat),
+ * et MIN/MAX_DEPLOYMENT_TIMEOUT_MS bornent ce qui est accepté quelle
+ * que soit la valeur reçue (défense en profondeur).
+ */
+export const DEFAULT_BUILD_TIMEOUT_MS = 8 * 60 * 1000
+export const DEFAULT_POST_BUILD_TIMEOUT_MS = 2 * 60 * 1000
+export const MIN_DEPLOYMENT_TIMEOUT_MS = 60 * 1000
+export const MAX_DEPLOYMENT_TIMEOUT_MS = 20 * 60 * 1000
+
+/*
+ * Réserve au plus DEFAULT_POST_BUILD_TIMEOUT_MS pour la phase
+ * post-build, mais jamais plus de la moitié du budget total si celui-
+ * ci est anormalement petit (valeur reçue proche du plancher) — le
+ * build garde toujours une part significative du budget.
+ */
+export function resolveDeploymentTimeouts(
+  requestedTotalMs?: number,
+): {
+  totalMs: number
+  buildTimeoutMs: number
+  postBuildTimeoutMs: number
+} {
+  const defaultTotal =
+    DEFAULT_BUILD_TIMEOUT_MS +
+    DEFAULT_POST_BUILD_TIMEOUT_MS
+
+  const requested =
+    requestedTotalMs ?? defaultTotal
+
+  const totalMs = Math.min(
+    Math.max(
+      requested,
+      MIN_DEPLOYMENT_TIMEOUT_MS,
+    ),
+    MAX_DEPLOYMENT_TIMEOUT_MS,
+  )
+
+  const postBuildTimeoutMs = Math.min(
+    DEFAULT_POST_BUILD_TIMEOUT_MS,
+    Math.floor(totalMs / 2),
+  )
+
+  const buildTimeoutMs =
+    totalMs - postBuildTimeoutMs
+
+  return { totalMs, buildTimeoutMs, postBuildTimeoutMs }
+}
+
+/*
+ * Mécanisme d'annulation du build vérifié avant implémentation
+ * (lecture du code source de dockerode@5.0.1 et docker-modem@5.0.7,
+ * puis vérification empirique séparée du comportement de Node) :
  * docker.buildImage() accepte une option `abortSignal` que
  * docker-modem relaie directement au `signal` natif de
- * `http.request()` de Node (docker-modem/lib/modem.js). Annuler ce
- * signal détruit la connexion HTTP Agent -> daemon Docker (pas
- * seulement Panel -> Agent) : le daemon Docker suit ce contexte
- * pendant toute la durée du build, y compris une étape RUN en cours,
- * et l'arrête à la coupure de connexion — c'est le même mécanisme
- * qu'un Ctrl+C sur `docker build` en CLI, indépendant de BuildKit
- * (jamais activé ici, voir plus haut).
+ * `http.request()` de Node. Annuler ce signal détruit la connexion
+ * HTTP Agent -> daemon Docker (pas seulement Panel -> Agent) : le
+ * daemon Docker suit ce contexte pendant toute la durée du build, y
+ * compris une étape RUN en cours, et l'arrête à la coupure de
+ * connexion — c'est le même mécanisme qu'un Ctrl+C sur `docker build`
+ * en CLI, indépendant de BuildKit (jamais activé ici : `version:"2"`
+ * n'est jamais passé aux options de build dans ce projet).
  */
-const BUILD_TIMEOUT_MS =
-  8 * 60 * 1000
 
 function createDeploymentId() {
   return crypto.randomUUID()
@@ -206,6 +263,7 @@ async function ensureDockerfile(
 
 async function removeImage(
   imageName: string,
+  abortSignal?: AbortSignal,
 ) {
   try {
     const image =
@@ -213,8 +271,15 @@ async function removeImage(
         imageName,
       )
 
+    /*
+     * image.remove() accepte bien un AbortSignal typé (vérifié dans
+     * @types/dockerode — ImageRemoveOptions), contrairement à
+     * container.remove()/rename() dans docker.ts. Pas besoin de
+     * withOperationTimeout ici.
+     */
     await image.remove({
       force: true,
+      abortSignal,
     })
 
     console.log(
@@ -256,6 +321,7 @@ async function removeSource(
 async function cleanupOldImages(
   siteName: string,
   currentImageName: string,
+  abortSignal?: AbortSignal,
 ) {
   const repository =
     `${IMAGE_PREFIX}/${siteName}:`
@@ -270,6 +336,7 @@ async function cleanupOldImages(
   const images =
     await docker.listImages({
       all: true,
+      abortSignal,
     })
 
   /*
@@ -278,6 +345,7 @@ async function cleanupOldImages(
   const containers =
     await docker.listContainers({
       all: true,
+      abortSignal,
     })
 
   /*
@@ -292,8 +360,16 @@ async function cleanupOldImages(
     null
 
   try {
+    /*
+     * image.inspect() n'accepte pas d'AbortSignal typé (même
+     * constat que dans docker.ts / createDeploymentContainer) :
+     * simple lecture de métadonnées, bornée par un timeout court.
+     */
     const currentInspect =
-      await currentImage.inspect()
+      await withOperationTimeout(
+        () => currentImage.inspect(),
+        "Timeout lors de la lecture des métadonnées de l'image active.",
+      )
 
     currentImageId =
       currentInspect.Id
@@ -365,6 +441,7 @@ async function cleanupOldImages(
 
         await removeImage(
           tag,
+          abortSignal,
         )
 
         continue
@@ -403,6 +480,7 @@ async function cleanupOldImages(
 
       await removeImage(
         tag,
+        abortSignal,
       )
     }
   }
@@ -416,7 +494,10 @@ export async function buildDeployment({
   siteName,
   repositoryUrl,
   branch,
-}: BuildDeploymentInput): Promise<BuildDeploymentResult> {
+  buildTimeoutMs = DEFAULT_BUILD_TIMEOUT_MS,
+}: BuildDeploymentInput & {
+  buildTimeoutMs?: number
+}): Promise<BuildDeploymentResult> {
   validateSiteName(siteName)
 
   if (!repositoryUrl) {
@@ -460,7 +541,7 @@ export async function buildDeployment({
   const buildTimeoutHandle =
     setTimeout(() => {
       buildController.abort()
-    }, BUILD_TIMEOUT_MS)
+    }, buildTimeoutMs)
 
   try {
     await ensureDirectory(
@@ -741,7 +822,7 @@ export async function buildDeployment({
      */
     if (buildController.signal.aborted) {
       throw new DeploymentTimeoutError(
-        `Le build a dépassé le délai maximal de ${BUILD_TIMEOUT_MS / 60_000} minutes et a été annulé.`,
+        `Le build a dépassé le délai maximal de ${buildTimeoutMs / 60_000} minutes et a été annulé.`,
         buildLogs,
       )
     }
@@ -768,15 +849,47 @@ export async function deployDeployment({
   repositoryUrl,
   branch,
   tenantId,
+  deploymentTimeoutMs,
 }: BuildDeploymentInput & {
   tenantId: string
+  /*
+   * Finding H1 (correction "timeout incomplet" + "invariant 8 min /
+   * 15 min") : budget TOTAL demandé par le Panel pour l'ensemble de
+   * l'opération. Optionnel — resolveDeploymentTimeouts() retombe sur
+   * les DEFAULT_* si absent (rétrocompat), et borne dans tous les cas
+   * entre MIN/MAX_DEPLOYMENT_TIMEOUT_MS.
+   */
+  deploymentTimeoutMs?: number
 }): Promise<DeployDeploymentResult> {
+  const { buildTimeoutMs, postBuildTimeoutMs } =
+    resolveDeploymentTimeouts(
+      deploymentTimeoutMs,
+    )
+
   const build =
     await buildDeployment({
       siteName,
       repositoryUrl,
       branch,
+      buildTimeoutMs,
     })
+
+  /*
+   * Deuxième AbortController, dédié à la phase post-build
+   * (remplacement du container + nettoyage des anciennes images) —
+   * distinct de buildController (déjà retombé à la fin de
+   * buildDeployment). Couvre la totalité de ce que fait
+   * deployDeployment après le build, contrairement à la version
+   * précédente où seul le build était borné (finding H1, revue
+   * indépendante du commit 2054172).
+   */
+  const postBuildController =
+    new AbortController()
+
+  const postBuildTimeoutHandle =
+    setTimeout(() => {
+      postBuildController.abort()
+    }, postBuildTimeoutMs)
 
   try {
     /*
@@ -791,6 +904,9 @@ export async function deployDeployment({
           build.imageName,
 
         tenantId,
+
+        abortSignal:
+          postBuildController.signal,
       })
 
     /*
@@ -807,6 +923,7 @@ export async function deployDeployment({
     await cleanupOldImages(
       siteName,
       build.imageName,
+      postBuildController.signal,
     )
 
     return {
@@ -817,13 +934,32 @@ export async function deployDeployment({
   } catch (error) {
     /*
      * Le build a réussi mais le déploiement
-     * du container a échoué.
+     * du container a échoué (ou a été annulé pour dépassement du
+     * délai post-build).
      *
-     * L'image n'est alors plus nécessaire.
+     * L'image n'est alors plus nécessaire. Nettoyage SANS le signal
+     * post-build : si c'est justement ce signal qui vient de
+     * s'annuler, le passer ici ferait échouer ce nettoyage avant même
+     * d'essayer — l'image orpheline resterait alors sur le disque.
      */
     await removeImage(
       build.imageName,
     )
+
+    /*
+     * Même logique de vérité que buildController dans
+     * buildDeployment() : seul l'état du signal indique de façon
+     * certaine que C'EST NOUS qui avons coupé la connexion pour
+     * dépassement du délai post-build — jamais une erreur Docker
+     * normale (image invalide, port manquant, Traefik indisponible,
+     * etc.), qui doit rester distinguable d'un timeout.
+     */
+    if (postBuildController.signal.aborted) {
+      throw new DeploymentTimeoutError(
+        `Le remplacement du container a dépassé le délai maximal de ${postBuildTimeoutMs / 60_000} minutes et a été annulé.`,
+        build.logs,
+      )
+    }
 
     throw new Error(
       `${
@@ -831,6 +967,10 @@ export async function deployDeployment({
           ? error.message
           : "Impossible de créer le container."
       }\n\n${build.logs}`,
+    )
+  } finally {
+    clearTimeout(
+      postBuildTimeoutHandle,
     )
   }
 }

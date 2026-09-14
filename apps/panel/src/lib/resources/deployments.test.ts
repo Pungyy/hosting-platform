@@ -2,10 +2,14 @@ import { randomUUID } from "node:crypto"
 
 import { describe, expect, it } from "vitest"
 
+import { AGENT_DEPLOYMENT_TIMEOUT_MS } from "@/lib/agent/client"
 import type { Queryer } from "@/lib/database"
 import {
   acquireDeploymentLock,
+  markDeploymentSuccess,
   markDeploymentTerminal,
+  RECLAIM_SAFETY_MARGIN_MS,
+  reclaimStaleDeployments,
   STALE_DEPLOYMENT_LOCK_MS,
 } from "@/lib/resources/deployments"
 import {
@@ -15,6 +19,56 @@ import {
 } from "@/test/fixtures"
 import { testPool } from "@/test/testDatabase"
 import { withTestTransaction } from "@/test/withTestTransaction"
+
+/*
+ * Attend, de façon déterministe, qu'un backend Postgres soit RÉELLEMENT
+ * bloqué par un autre (pg_blocking_pids) — remplace un délai arbitraire
+ * (revue indépendante du commit H1 2054172, finding "tests" §5) qui
+ * pourrait être trop court sur une machine chargée (test flaky, faux
+ * négatif) ou inutilement long sinon.
+ */
+async function waitUntilBlocked(pid: number, timeoutMs = 5_000) {
+  const start = Date.now()
+
+  while (Date.now() - start < timeoutMs) {
+    const result = await testPool.query<{ blocked: boolean }>(
+      "SELECT cardinality(pg_blocking_pids($1)) > 0 AS blocked",
+      [pid],
+    )
+
+    if (result.rows[0].blocked) return
+
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+
+  throw new Error(
+    `Timeout : le backend ${pid} n'a jamais été détecté comme bloqué par pg_blocking_pids().`,
+  )
+}
+
+/*
+ * Invariant timeout Agent / stale-lock Panel (finding H1, "invariant
+ * 8 min / 15 min" — revue indépendante du commit 2054172, §3) :
+ * STALE_DEPLOYMENT_LOCK_MS doit rester strictement supérieur au
+ * budget total que le Panel autorise lui-même à l'Agent. Ce test ne
+ * vérifie pas un comportement dynamique : il vérifie que la RELATION
+ * ARITHMÉTIQUE entre les deux constantes (dérivation, pas deux
+ * nombres indépendants) reste intacte si quelqu'un modifie l'un des
+ * deux fichiers plus tard sans y penser.
+ */
+describe("Invariant timeout Agent / stale-lock Panel (finding H1)", () => {
+  it("STALE_DEPLOYMENT_LOCK_MS reste strictement supérieur au budget total Agent", () => {
+    expect(STALE_DEPLOYMENT_LOCK_MS).toBeGreaterThan(
+      AGENT_DEPLOYMENT_TIMEOUT_MS,
+    )
+  })
+
+  it("la marge de sécurité est exactement RECLAIM_SAFETY_MARGIN_MS (dérivation, pas un second nombre indépendant)", () => {
+    expect(
+      STALE_DEPLOYMENT_LOCK_MS - AGENT_DEPLOYMENT_TIMEOUT_MS,
+    ).toBe(RECLAIM_SAFETY_MARGIN_MS)
+  })
+})
 
 describe("acquireDeploymentLock", () => {
   it("aucun deployment running -> création autorisée", async () => {
@@ -253,6 +307,11 @@ describe("acquireDeploymentLock", () => {
           await clientA.query("BEGIN")
           await clientB.query("BEGIN")
 
+          const pidBResult = await clientB.query<{ pid: number }>(
+            "SELECT pg_backend_pid() AS pid",
+          )
+          const pidB = pidBResult.rows[0].pid
+
           const dbA: Queryer = {
             query: (text, values) => clientA.query(text, values),
           }
@@ -270,7 +329,16 @@ describe("acquireDeploymentLock", () => {
            */
           const pendingB = acquireDeploymentLock(siteId, "main", dbB)
 
-          await new Promise((resolve) => setTimeout(resolve, 150))
+          /*
+           * Attend une preuve RÉELLE (pg_blocking_pids) que B est bien
+           * bloqué par A avant de commit — pas un délai arbitraire
+           * (finding H1, "tests", revue indépendante du commit
+           * 2054172, §5) qui pourrait laisser passer une exécution où
+           * B aurait en réalité déjà fini (faux négatif masquant une
+           * régression de l'exclusion mutuelle) ou ralentir le test
+           * sans raison sur une machine rapide.
+           */
+          await waitUntilBlocked(pidB)
 
           await clientA.query("COMMIT")
 
@@ -338,6 +406,277 @@ describe("markDeploymentTerminal", () => {
       expect(row.rows[0].logs).toBe(
         "logs existants\n\nSuffixe ajouté.",
       )
+    })
+  })
+})
+
+/*
+ * Testée directement plutôt que seulement de façon incidente via
+ * acquireDeploymentLock() (qui l'appelle en interne) — la revue
+ * indépendante du commit H1 2054172 notait que le mécanisme de
+ * réclamation n'était pas isolé dans son propre test (finding
+ * "tests", §5).
+ */
+describe("reclaimStaleDeployments (isolé)", () => {
+  it("réclame un deployment 'running' démarré avant le seuil de sécurité", async () => {
+    await withTestTransaction(async (db) => {
+      const owner = await createTestUser(db)
+      const server = await createTestServer(db)
+      const site = await createTestSite(db, {
+        userId: owner.id,
+        serverId: server.id,
+      })
+
+      const staleStartedAt = new Date(
+        Date.now() - STALE_DEPLOYMENT_LOCK_MS - 60_000,
+      )
+
+      const staleResult = await db.query<{ id: string }>(
+        `
+          INSERT INTO deployments (site_id, branch, status, started_at)
+          VALUES ($1, 'main', 'running', $2)
+          RETURNING id
+        `,
+        [site.id, staleStartedAt],
+      )
+      const staleDeploymentId = staleResult.rows[0].id
+
+      await reclaimStaleDeployments(site.id, db)
+
+      const row = await db.query<{
+        status: string
+        finished_at: string | null
+      }>(
+        `SELECT status, finished_at FROM deployments WHERE id = $1`,
+        [staleDeploymentId],
+      )
+
+      expect(row.rows[0].status).toBe("failed")
+      expect(row.rows[0].finished_at).not.toBeNull()
+    })
+  })
+
+  it("ne touche pas un deployment 'running' encore dans le délai de sécurité", async () => {
+    await withTestTransaction(async (db) => {
+      const owner = await createTestUser(db)
+      const server = await createTestServer(db)
+      const site = await createTestSite(db, {
+        userId: owner.id,
+        serverId: server.id,
+      })
+
+      const recentResult = await db.query<{ id: string }>(
+        `
+          INSERT INTO deployments (site_id, branch, status, started_at)
+          VALUES ($1, 'main', 'running', NOW())
+          RETURNING id
+        `,
+        [site.id],
+      )
+      const recentDeploymentId = recentResult.rows[0].id
+
+      await reclaimStaleDeployments(site.id, db)
+
+      const row = await db.query<{ status: string }>(
+        `SELECT status FROM deployments WHERE id = $1`,
+        [recentDeploymentId],
+      )
+
+      expect(row.rows[0].status).toBe("running")
+    })
+  })
+
+  it("ne touche jamais un deployment déjà terminal, même ancien", async () => {
+    await withTestTransaction(async (db) => {
+      const owner = await createTestUser(db)
+      const server = await createTestServer(db)
+      const site = await createTestSite(db, {
+        userId: owner.id,
+        serverId: server.id,
+      })
+
+      const staleStartedAt = new Date(
+        Date.now() - STALE_DEPLOYMENT_LOCK_MS - 60_000,
+      )
+
+      const successResult = await db.query<{ id: string }>(
+        `
+          INSERT INTO deployments (site_id, branch, status, started_at, finished_at)
+          VALUES ($1, 'main', 'success', $2, NOW())
+          RETURNING id
+        `,
+        [site.id, staleStartedAt],
+      )
+      const successDeploymentId = successResult.rows[0].id
+
+      await reclaimStaleDeployments(site.id, db)
+
+      const row = await db.query<{ status: string }>(
+        `SELECT status FROM deployments WHERE id = $1`,
+        [successDeploymentId],
+      )
+
+      expect(row.rows[0].status).toBe("success")
+    })
+  })
+})
+
+/*
+ * Finding H1, "statut final écrasable" (revue indépendante du commit
+ * 2054172, §1) : reproduit la race exacte signalée — une requête dont
+ * l'appel Agent traîne au-delà du délai de sécurité, pendant qu'une
+ * AUTRE requête (typiquement la prochaine acquireDeploymentLock() sur
+ * le même site) réclame le verrou comme abandonné. Sans le CAS
+ * (WHERE status = 'running'), la première requête écraserait
+ * silencieusement le statut 'failed' déjà tranché.
+ */
+describe("CAS sur les transitions terminales — race réclamation vs réponse finale (finding H1)", () => {
+  it("markDeploymentSuccess refuse d'écraser un deployment déjà réclamé comme 'failed'", async () => {
+    await withTestTransaction(async (db) => {
+      const owner = await createTestUser(db)
+      const server = await createTestServer(db)
+      const site = await createTestSite(db, {
+        userId: owner.id,
+        serverId: server.id,
+      })
+
+      const { deploymentId } = await acquireDeploymentLock(
+        site.id,
+        "main",
+        db,
+      )
+
+      /*
+       * Simule la réclamation paresseuse (reclaimStaleDeployments)
+       * qui aurait eu lieu PENDANT que l'appel Agent de cette requête
+       * était encore en cours — indépendamment du mécanisme de
+       * réclamation lui-même (déjà testé isolément ci-dessus), pour
+       * isoler strictement le comportement du CAS.
+       */
+      await markDeploymentTerminal(
+        deploymentId!,
+        "failed",
+        "\n\n[Auto] Réclamé par une autre requête pendant le test.",
+        db,
+      )
+
+      const result = await markDeploymentSuccess(
+        deploymentId!,
+        {
+          commitSha: "a".repeat(40),
+          logs: "build réussi, mais trop tard",
+          imageName: "hosting/demo:x",
+          imageId: "sha256:x",
+          containerName: "hosting-site-demo",
+          containerId: "container-x",
+        },
+        db,
+      )
+
+      expect(result.applied).toBe(false)
+
+      const row = await db.query<{
+        status: string
+        image_name: string | null
+      }>(
+        `SELECT status, image_name FROM deployments WHERE id = $1`,
+        [deploymentId],
+      )
+
+      // Le statut 'failed' déjà tranché n'a jamais été écrasé par
+      // 'success', et aucun champ associé au succès n'a été écrit.
+      expect(row.rows[0].status).toBe("failed")
+      expect(row.rows[0].image_name).toBeNull()
+    })
+  })
+
+  it("markDeploymentTerminal refuse d'écraser un deployment déjà marqué 'success'", async () => {
+    await withTestTransaction(async (db) => {
+      const owner = await createTestUser(db)
+      const server = await createTestServer(db)
+      const site = await createTestSite(db, {
+        userId: owner.id,
+        serverId: server.id,
+      })
+
+      const { deploymentId } = await acquireDeploymentLock(
+        site.id,
+        "main",
+        db,
+      )
+
+      const successResult = await markDeploymentSuccess(
+        deploymentId!,
+        {
+          commitSha: "a".repeat(40),
+          logs: "build réussi",
+          imageName: "hosting/demo:x",
+          imageId: "sha256:x",
+          containerName: "hosting-site-demo",
+          containerId: "container-x",
+        },
+        db,
+      )
+      expect(successResult.applied).toBe(true)
+
+      const terminalResult = await markDeploymentTerminal(
+        deploymentId!,
+        "failed",
+        "\n\nArrivée en retard après le succès.",
+        db,
+      )
+
+      expect(terminalResult.applied).toBe(false)
+
+      const row = await db.query<{ status: string }>(
+        `SELECT status FROM deployments WHERE id = $1`,
+        [deploymentId],
+      )
+
+      expect(row.rows[0].status).toBe("success")
+    })
+  })
+
+  it("markDeploymentSuccess réussit normalement quand la ligne est encore 'running' (chemin nominal, non-régression)", async () => {
+    await withTestTransaction(async (db) => {
+      const owner = await createTestUser(db)
+      const server = await createTestServer(db)
+      const site = await createTestSite(db, {
+        userId: owner.id,
+        serverId: server.id,
+      })
+
+      const { deploymentId } = await acquireDeploymentLock(
+        site.id,
+        "main",
+        db,
+      )
+
+      const result = await markDeploymentSuccess(
+        deploymentId!,
+        {
+          commitSha: "a".repeat(40),
+          logs: "build réussi",
+          imageName: "hosting/demo:x",
+          imageId: "sha256:x",
+          containerName: "hosting-site-demo",
+          containerId: "container-x",
+        },
+        db,
+      )
+
+      expect(result.applied).toBe(true)
+
+      const row = await db.query<{
+        status: string
+        image_name: string | null
+      }>(
+        `SELECT status, image_name FROM deployments WHERE id = $1`,
+        [deploymentId],
+      )
+
+      expect(row.rows[0].status).toBe("success")
+      expect(row.rows[0].image_name).toBe("hosting/demo:x")
     })
   })
 })

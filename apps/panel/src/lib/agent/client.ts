@@ -407,6 +407,32 @@ export async function disconnectAgentSiteLegacyNetwork(
   )
 }
 
+/*
+ * Budget de temps du déploiement (finding H1, correction de l'invariant
+ * timeout Agent / stale-lock Panel).
+ *
+ * Le PANEL est l'unique source de vérité : il décide de la durée
+ * maximale qu'il autorise pour TOUTE l'opération de déploiement côté
+ * Agent (build + remplacement du container + nettoyage des anciennes
+ * images), et transmet explicitement cette valeur à l'Agent à chaque
+ * appel (`deploymentTimeoutMs`, voir controllers/deployments.ts côté
+ * Agent). Aucun import entre apps/panel et apps/agent n'est nécessaire
+ * ni possible : la valeur voyage comme une donnée HTTP ordinaire, à
+ * chaque requête, sans cache ni risque de désynchronisation — l'Agent
+ * retombe sur ses propres valeurs par défaut si le champ est absent
+ * (rétrocompatibilité), et plafonne de son côté ce qu'il accepte
+ * (défense en profondeur contre une valeur envoyée aberrante).
+ *
+ * lib/resources/deployments.ts DÉRIVE son seuil de réclamation
+ * ("stale lock") de CETTE MÊME constante (+ une marge), au lieu de
+ * choisir un second nombre indépendant — c'est ce qui rend l'invariant
+ * structurellement impossible à casser silencieusement.
+ */
+export const AGENT_BUILD_BUDGET_MS = 8 * 60 * 1000
+export const AGENT_POST_BUILD_BUDGET_MS = 2 * 60 * 1000
+export const AGENT_DEPLOYMENT_TIMEOUT_MS =
+  AGENT_BUILD_BUDGET_MS + AGENT_POST_BUILD_BUDGET_MS
+
 export async function deployAgentSite(
   serverId: string,
   data: {
@@ -421,14 +447,22 @@ export async function deployAgentSite(
     "/deployments/build",
     {
       method: "POST",
-      body: JSON.stringify(data),
+      body: JSON.stringify({
+        ...data,
+        deploymentTimeoutMs: AGENT_DEPLOYMENT_TIMEOUT_MS,
+      }),
 
       /*
-       * Le build (clone + docker build + swap de container) est
-       * synchrone côté Agent et peut durer plusieurs minutes.
+       * Le build (clone + docker build + swap de container + nettoyage)
+       * est synchrone côté Agent. Le budget qu'on lui a explicitement
+       * transmis (AGENT_DEPLOYMENT_TIMEOUT_MS) doit TOUJOURS expirer
+       * avant ce timeout HTTP, sinon le Panel abandonnerait avant que
+       * l'Agent n'ait eu la moindre chance de répondre proprement —
+       * marge d'une minute pour le transit réseau/traitement de la
+       * réponse.
        */
       signal: AbortSignal.timeout(
-        10 * 60 * 1000,
+        AGENT_DEPLOYMENT_TIMEOUT_MS + 60_000,
       ),
     },
   )

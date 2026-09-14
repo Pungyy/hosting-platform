@@ -6,6 +6,7 @@ import { query } from "@/lib/database"
 import { apiErrorResponse } from "@/lib/http/api-error"
 import {
   acquireDeploymentLock,
+  markDeploymentSuccess,
   markDeploymentTerminal,
 } from "@/lib/resources/deployments"
 import { getOwnedSite } from "@/lib/resources/sites"
@@ -114,46 +115,31 @@ export async function POST(
       deployment.logs ??
       ""
     /*
-     * Enregistrement du résultat du déploiement.
+     * Enregistrement du résultat du déploiement — CAS explicite
+     * (finding H1, correction "statut écrasable") : n'écrit 'success'
+     * que si la ligne est ENCORE 'running'. Si une autre requête l'a
+     * déjà réclamée comme 'failed' (délai de sécurité dépassé pendant
+     * que cet appel Agent était en cours), on ne l'écrase jamais
+     * silencieusement.
      */
-    await query(
-      `
-        UPDATE deployments
-        SET
-          commit_sha = $1,
-          status = 'success',
-          finished_at = NOW(),
-          logs = $2,
-          image_name = $3,
-          image_id = $4,
-          container_name = $5,
-          container_id = $6
-        WHERE id = $7
-      `,
-      [
-        deployment.commitSha ??
-          null,
-
-        logs,
-
-        deployment.imageName ??
-          null,
-
-        deployment.imageId ??
-          null,
-
-        deployment.container?.name ??
-          null,
-
-        deployment.container?.id ??
-          null,
-
+    const successResult =
+      await markDeploymentSuccess(
         deploymentId,
-      ],
-    )
+        {
+          commitSha: deployment.commitSha ?? null,
+          logs,
+          imageName: deployment.imageName ?? null,
+          imageId: deployment.imageId ?? null,
+          containerName: deployment.container?.name ?? null,
+          containerId: deployment.container?.id ?? null,
+        },
+      )
 
     /*
-     * Synchronisation des informations du site.
+     * Synchronisation des informations du site — reflète l'état réel
+     * de Docker (le container a bien été remplacé par l'Agent),
+     * indépendamment de l'issue du CAS ci-dessus sur la ligne de
+     * bookkeeping deployments.
      */
     if (
       deployment.container?.name ||
@@ -187,6 +173,27 @@ export async function POST(
 
           site.id,
         ],
+      )
+    }
+
+    if (!successResult.applied) {
+      /*
+       * Le déploiement a réellement réussi côté Agent (le site est à
+       * jour, cf. synchronisation ci-dessus), mais son suivi a expiré
+       * côté Panel avant de pouvoir enregistrer ce succès — jamais un
+       * "ok" silencieux qui contredirait ce qui est réellement en base.
+       */
+      return NextResponse.json(
+        {
+          status: "error",
+          message:
+            "Le déploiement a été appliqué avec succès sur le serveur, mais son suivi a expiré côté Panel avant l'enregistrement final (délai de sécurité dépassé). Le site a été mis à jour ; vérifiez son état actuel.",
+          deployment: {
+            id: deploymentId,
+            ...deployment,
+          },
+        },
+        { status: 409 },
       )
     }
 

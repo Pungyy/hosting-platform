@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 const TENANT_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 const TENANT_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
@@ -51,6 +51,27 @@ beforeEach(() => {
   mockDockerInstance.getContainer.mockReturnValue(mockContainer)
   mockDockerInstance.getNetwork.mockReturnValue(mockNetwork)
 })
+
+afterEach(() => {
+  vi.useRealTimers()
+})
+
+/*
+ * Distingue les appels listContainers() selon le pattern de nom filtré
+ * (containerName final vs <containerName>-deployment temporaire) —
+ * nécessaire pour piloter précisément les étapes successives de
+ * createDeploymentContainer() (existingContainer, oldTemporaryContainer,
+ * oldContainer, finalContainer), qui interrogent toutes le même mock
+ * listContainers mais avec des filtres différents.
+ */
+function nameFilterOf(
+  options: unknown,
+): string {
+  const parsed = JSON.parse(
+    (options as { filters: string }).filters,
+  )
+  return parsed.name[0] as string
+}
 
 describe("validateTenantId", () => {
   it("accepte un UUID minuscule bien formé", () => {
@@ -321,5 +342,189 @@ describe("createDeploymentContainer — durcissement host.docker.internal", () =
     expect(args.HostConfig.ExtraHosts).toEqual(
       TENANT_CONTAINER_EXTRA_HOSTS,
     )
+  })
+})
+
+/*
+ * Finding H1, "timeout incomplet" (revue indépendante du commit
+ * 2054172, §2/§4) : vérifie que le MÊME abortSignal transmis par
+ * l'appelant se retrouve bien sur chaque opération dockerode qui le
+ * supporte nativement (create/start/inspect/list — vérifié dans
+ * @types/dockerode), et que les opérations qui ne le supportent pas
+ * (remove/rename) sont bornées par withOperationTimeout() plutôt que
+ * de pouvoir attendre indéfiniment.
+ */
+describe("createDeploymentContainer — propagation de l'abortSignal (finding H1)", () => {
+  it("transmet le même abortSignal à createContainer/start/inspect/listNetworks/listContainers", async () => {
+    const abortController = new AbortController()
+
+    mockDockerInstance.listContainers.mockResolvedValue([])
+    mockDockerInstance.listNetworks.mockResolvedValue([])
+    mockDockerInstance.createNetwork.mockResolvedValue({})
+    mockDockerInstance.getImage.mockReturnValue({
+      inspect: vi.fn().mockResolvedValue({
+        Config: { ExposedPorts: { "8080/tcp": {} } },
+      }),
+    })
+
+    const newContainerMock = {
+      start: vi.fn().mockResolvedValue(undefined),
+      inspect: vi.fn().mockResolvedValue({
+        Id: "new-container-id",
+        State: { Running: true, Status: "running" },
+      }),
+      remove: vi.fn().mockResolvedValue(undefined),
+      rename: vi.fn().mockResolvedValue(undefined),
+    }
+    mockDockerInstance.createContainer.mockResolvedValue(
+      newContainerMock,
+    )
+
+    /*
+     * Après le renommage, createDeploymentContainer recherche le
+     * container sous son nom final — on simule qu'il est bien trouvé
+     * cette fois (listContainers renvoie un résultat pour CET appel
+     * précis, tous les autres appels "nom final" ayant renvoyé [] —
+     * existingContainer et oldContainer, avant la création).
+     */
+    let containerNameCalls = 0
+    mockDockerInstance.listContainers.mockImplementation(
+      async (options: unknown) => {
+        const pattern = nameFilterOf(options)
+
+        if (pattern.includes("-deployment$")) {
+          return []
+        }
+
+        containerNameCalls += 1
+
+        // 1er appel = existingContainer, 2e = oldContainer : aucun
+        // container trouvé. 3e = finalContainer (après rename) :
+        // trouvé.
+        if (containerNameCalls < 3) {
+          return []
+        }
+
+        return [{ Id: "new-container-id" }]
+      },
+    )
+    mockDockerInstance.getContainer.mockReturnValue(newContainerMock)
+
+    const result = await createDeploymentContainer({
+      siteName: "test-site",
+      imageName: "hosting/test-site:abc",
+      tenantId: TENANT_A,
+      abortSignal: abortController.signal,
+    })
+
+    expect(result.running).toBe(true)
+
+    expect(
+      mockDockerInstance.createContainer.mock.calls[0][0]
+        .abortSignal,
+    ).toBe(abortController.signal)
+
+    expect(newContainerMock.start).toHaveBeenCalledWith({
+      abortSignal: abortController.signal,
+    })
+
+    expect(newContainerMock.inspect).toHaveBeenCalledWith({
+      abortSignal: abortController.signal,
+    })
+
+    for (const call of mockDockerInstance.listContainers.mock
+      .calls) {
+      expect(call[0].abortSignal).toBe(abortController.signal)
+    }
+
+    for (const call of mockDockerInstance.listNetworks.mock
+      .calls) {
+      expect(call[0].abortSignal).toBe(abortController.signal)
+    }
+
+    /*
+     * rename() n'accepte pas d'AbortSignal typé (vérifié dans
+     * @types/dockerode) — appelé sans ce champ, mais toujours borné
+     * par withOperationTimeout (voir le test suivant).
+     */
+    expect(newContainerMock.rename).toHaveBeenCalledWith({
+      name: "hosting-site-test-site",
+    })
+  })
+
+  it("un remove() de l'ancien container qui ne répond jamais est borné par un timeout dédié (pas d'attente infinie)", async () => {
+    vi.useFakeTimers()
+
+    mockDockerInstance.listNetworks.mockResolvedValue([])
+    mockDockerInstance.createNetwork.mockResolvedValue({})
+    mockDockerInstance.getImage.mockReturnValue({
+      inspect: vi.fn().mockResolvedValue({
+        Config: { ExposedPorts: { "8080/tcp": {} } },
+      }),
+    })
+
+    const newContainerMock = {
+      start: vi.fn().mockResolvedValue(undefined),
+      inspect: vi.fn().mockResolvedValue({
+        Id: "new-container-id",
+        State: { Running: true, Status: "running" },
+      }),
+      // Nettoyage best-effort du nouveau container si la suppression
+      // de l'ancien échoue : doit réussir vite pour ne pas ajouter une
+      // seconde attente de 30 s dans ce test.
+      remove: vi.fn().mockResolvedValue(undefined),
+      rename: vi.fn().mockResolvedValue(undefined),
+    }
+    mockDockerInstance.createContainer.mockResolvedValue(
+      newContainerMock,
+    )
+
+    let containerNameCalls = 0
+    mockDockerInstance.listContainers.mockImplementation(
+      async (options: unknown) => {
+        const pattern = nameFilterOf(options)
+
+        if (pattern.includes("-deployment$")) {
+          return []
+        }
+
+        containerNameCalls += 1
+
+        // 1er appel = existingContainer : aucun. 2e = oldContainer :
+        // trouvé — c'est celui dont remove() ne répondra jamais.
+        if (containerNameCalls === 1) {
+          return []
+        }
+
+        return [{ Id: "old-container-id" }]
+      },
+    )
+
+    // L'ancien container : sa suppression ne se termine JAMAIS d'elle-
+    // même (simule un daemon Docker qui ne répond plus) — seul
+    // withOperationTimeout doit borner cette attente.
+    const oldContainerMock = {
+      remove: vi.fn(() => new Promise(() => {})),
+    }
+    mockDockerInstance.getContainer.mockReturnValue(oldContainerMock)
+
+    const promise = createDeploymentContainer({
+      siteName: "test-site",
+      imageName: "hosting/test-site:abc",
+      tenantId: TENANT_A,
+    })
+    promise.catch(() => {})
+
+    // Bien après le délai dédié (30 s) — l'attente ne doit jamais être
+    // infinie.
+    await vi.advanceTimersByTimeAsync(31_000)
+
+    await expect(promise).rejects.toThrow(
+      /Impossible de supprimer l'ancien container/,
+    )
+
+    expect(oldContainerMock.remove).toHaveBeenCalledWith({
+      force: true,
+    })
   })
 })

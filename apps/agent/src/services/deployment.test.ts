@@ -64,21 +64,44 @@ const { mockCreateDeploymentContainer } = vi.hoisted(() => ({
 
 vi.mock("./docker.js", () => ({
   createDeploymentContainer: mockCreateDeploymentContainer,
+  /*
+   * Réimplémentation fidèle (mais sans le timer de secours) de la
+   * fonction réelle de docker.ts : exécute juste l'opération. Avant ce
+   * correctif, ce mock de module omettait totalement
+   * withOperationTimeout, si bien que cleanupOldImages() l'appelait
+   * comme `undefined(...)` — l'erreur résultante était avalée en
+   * silence par le catch existant autour de currentImage.inspect(),
+   * masquant le problème plutôt que de le révéler.
+   */
+  withOperationTimeout: async (
+    operation: () => Promise<unknown>,
+  ) => operation(),
+}))
+
+const { mockFsRm } = vi.hoisted(() => ({
+  mockFsRm: vi.fn().mockResolvedValue(undefined),
 }))
 
 vi.mock("node:fs", () => ({
   promises: {
     mkdir: vi.fn().mockResolvedValue(undefined),
     stat: vi.fn().mockResolvedValue({ isFile: () => true }),
-    rm: vi.fn().mockResolvedValue(undefined),
+    rm: mockFsRm,
   },
 }))
 
 import {
   buildDeployment,
+  DEFAULT_BUILD_TIMEOUT_MS,
+  DEFAULT_POST_BUILD_TIMEOUT_MS,
   deployDeployment,
   DeploymentTimeoutError,
+  MAX_DEPLOYMENT_TIMEOUT_MS,
+  MIN_DEPLOYMENT_TIMEOUT_MS,
+  resolveDeploymentTimeouts,
 } from "./deployment.js"
+
+const TENANT_ID = "11111111-1111-4111-8111-111111111111"
 
 /*
  * Simule un stream de build "normal" : docker.buildImage() résout
@@ -228,6 +251,19 @@ describe("buildDeployment — timeout dur (finding H1)", () => {
 
     expect(mockGetImage).toHaveBeenCalled()
     expect(mockImageRemove).toHaveBeenCalledWith({ force: true })
+
+    /*
+     * Le répertoire source (clone Git) doit lui aussi être nettoyé —
+     * jusqu'ici ce mock n'était pas exposé via vi.hoisted() et cette
+     * assertion était donc absente : le test prétendait vérifier le
+     * nettoyage du répertoire source sans jamais l'observer (finding
+     * H1, "tests", revue indépendante du commit 2054172, §5).
+     */
+    expect(mockFsRm).toHaveBeenCalledWith(expect.any(String), {
+      recursive: true,
+      force: true,
+    })
+    expect(mockFsRm).toHaveBeenCalledTimes(1)
   })
 
   it("aucun timer résiduel après un build terminé normalement (pas de build zombie)", async () => {
@@ -359,5 +395,261 @@ describe("deployDeployment — intégration build + container", () => {
 
     expect(result.container.running).toBe(true)
     expect(mockCreateDeploymentContainer).toHaveBeenCalledTimes(1)
+  })
+})
+
+/*
+ * Finding H1, "timeout incomplet" (revue indépendante du commit
+ * 2054172, §2) : le timeout précédent ne couvrait que buildDeployment()
+ * — createDeploymentContainer()/cleanupOldImages() (appelés par
+ * deployDeployment) n'étaient bornés par AUCUNE limite. Ces tests
+ * vérifient le second AbortController dédié à cette phase.
+ */
+describe("resolveDeploymentTimeouts — dérivation du budget (finding H1)", () => {
+  it("sans valeur demandée, retombe sur les budgets par défaut (8 min + 2 min)", () => {
+    const result = resolveDeploymentTimeouts(undefined)
+
+    expect(result.buildTimeoutMs).toBe(DEFAULT_BUILD_TIMEOUT_MS)
+    expect(result.postBuildTimeoutMs).toBe(
+      DEFAULT_POST_BUILD_TIMEOUT_MS,
+    )
+    expect(result.totalMs).toBe(
+      DEFAULT_BUILD_TIMEOUT_MS + DEFAULT_POST_BUILD_TIMEOUT_MS,
+    )
+  })
+
+  it("une valeur en dessous du plancher est relevée à MIN_DEPLOYMENT_TIMEOUT_MS (défense en profondeur)", () => {
+    const result = resolveDeploymentTimeouts(1_000)
+
+    expect(result.totalMs).toBe(MIN_DEPLOYMENT_TIMEOUT_MS)
+  })
+
+  it("une valeur au-dessus du plafond est ramenée à MAX_DEPLOYMENT_TIMEOUT_MS (l'Agent ne fait jamais confiance au Panel au-delà)", () => {
+    const result = resolveDeploymentTimeouts(
+      MAX_DEPLOYMENT_TIMEOUT_MS + 60 * 60 * 1000,
+    )
+
+    expect(result.totalMs).toBe(MAX_DEPLOYMENT_TIMEOUT_MS)
+  })
+
+  it("buildTimeoutMs + postBuildTimeoutMs vaut toujours exactement totalMs", () => {
+    for (const requested of [
+      undefined,
+      MIN_DEPLOYMENT_TIMEOUT_MS,
+      90_000,
+      5 * 60 * 1000,
+      DEFAULT_BUILD_TIMEOUT_MS + DEFAULT_POST_BUILD_TIMEOUT_MS,
+      MAX_DEPLOYMENT_TIMEOUT_MS,
+    ]) {
+      const result = resolveDeploymentTimeouts(requested)
+
+      expect(
+        result.buildTimeoutMs + result.postBuildTimeoutMs,
+      ).toBe(result.totalMs)
+    }
+  })
+
+  it("le build garde toujours une part significative du budget, même sur un budget total proche du plancher", () => {
+    const result = resolveDeploymentTimeouts(
+      MIN_DEPLOYMENT_TIMEOUT_MS,
+    )
+
+    // postBuildTimeoutMs ne mange jamais plus de la moitié du total.
+    expect(result.postBuildTimeoutMs).toBeLessThanOrEqual(
+      result.buildTimeoutMs,
+    )
+  })
+})
+
+/*
+ * Simule un remplacement de container qui ne se termine JAMAIS de
+ * lui-même (createDeploymentContainer ne résout que si son
+ * abortSignal est déclenché) — même principe que mockHangingBuild(),
+ * pour la phase POST-build cette fois.
+ */
+function mockHangingContainerReplacement() {
+  mockCreateDeploymentContainer.mockImplementation(
+    ({ abortSignal }: { abortSignal?: AbortSignal }) =>
+      new Promise((_resolve, reject) => {
+        abortSignal?.addEventListener("abort", () => {
+          const abortError = new Error("aborted")
+          abortError.name = "AbortError"
+          reject(abortError)
+        })
+        // Ne résout/rejette jamais spontanément.
+      }),
+  )
+}
+
+describe("deployDeployment — timeout post-build (finding H1)", () => {
+  it("un remplacement de container qui ne se termine jamais est réellement annulé après le délai post-build", async () => {
+    vi.useFakeTimers()
+    mockFastSuccessfulBuild()
+    mockHangingContainerReplacement()
+
+    const promise = deployDeployment({
+      siteName: "slow-post-build",
+      repositoryUrl: "https://github.com/acme/app",
+      branch: "main",
+      tenantId: TENANT_ID,
+      // Budget total volontairement petit pour ne pas attendre les
+      // 10 minutes par défaut dans ce test : buildTimeoutMs=30s,
+      // postBuildTimeoutMs=30s (resolveDeploymentTimeouts(60_000)).
+      deploymentTimeoutMs: 60_000,
+    })
+    promise.catch(() => {})
+
+    // Laisse le build (rapide) se terminer complètement.
+    await vi.advanceTimersByTimeAsync(0)
+
+    // Toujours en cours juste avant l'expiration du délai post-build.
+    await vi.advanceTimersByTimeAsync(29_000)
+
+    await vi.advanceTimersByTimeAsync(2_000)
+
+    await expect(promise).rejects.toThrow(DeploymentTimeoutError)
+  })
+
+  it("le message du timeout post-build est distinct du message du timeout de build", async () => {
+    vi.useFakeTimers()
+    mockFastSuccessfulBuild()
+    mockHangingContainerReplacement()
+
+    const promise = deployDeployment({
+      siteName: "slow-post-build-message",
+      repositoryUrl: "https://github.com/acme/app",
+      branch: "main",
+      tenantId: TENANT_ID,
+      deploymentTimeoutMs: 60_000,
+    })
+    promise.catch(() => {})
+
+    await vi.advanceTimersByTimeAsync(31_000)
+
+    await expect(promise).rejects.toThrow(
+      /remplacement du container/,
+    )
+
+    /*
+     * S'assure explicitement que ce n'est PAS le message de timeout
+     * du build qui a fuité ici — les deux phases doivent rester
+     * distinguables (exigence explicite de l'utilisateur : "Conserve
+     * une distinction claire entre : build timeout ; erreur Docker ;
+     * timeout post-build").
+     */
+    await expect(promise).rejects.not.toThrow(/^Le build a dépassé/)
+  })
+
+  it("nettoie l'image buildée après un timeout post-build (pas de ressource orpheline)", async () => {
+    vi.useFakeTimers()
+    mockFastSuccessfulBuild()
+    mockHangingContainerReplacement()
+
+    const promise = deployDeployment({
+      siteName: "slow-post-build-cleanup",
+      repositoryUrl: "https://github.com/acme/app",
+      branch: "main",
+      tenantId: TENANT_ID,
+      deploymentTimeoutMs: 60_000,
+    })
+    promise.catch(() => {})
+
+    await vi.advanceTimersByTimeAsync(31_000)
+
+    await expect(promise).rejects.toThrow(DeploymentTimeoutError)
+
+    const imageNamesRequested = (
+      mockGetImage.mock.calls as unknown[][]
+    ).map((call) => call[0] as string)
+    expect(
+      imageNamesRequested.some((name) =>
+        name.includes("slow-post-build-cleanup"),
+      ),
+    ).toBe(true)
+    expect(mockImageRemove).toHaveBeenCalled()
+  })
+
+  it("aucun timer résiduel après un déploiement complet réussi (pas de déploiement zombie)", async () => {
+    vi.useFakeTimers()
+    mockFastSuccessfulBuild()
+    mockCreateDeploymentContainer.mockResolvedValue({
+      id: "container-id",
+      name: "hosting-site-ok",
+      containerName: "hosting-site-ok",
+      image: "hosting/ok-site:x",
+      containerPort: 8080,
+      state: "running",
+      running: true,
+    })
+
+    await deployDeployment({
+      siteName: "ok-site",
+      repositoryUrl: "https://github.com/acme/app",
+      branch: "main",
+      tenantId: TENANT_ID,
+    })
+
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it("le timeout post-build d'un tenant A n'affecte jamais un remplacement de container concurrent du tenant B", async () => {
+    vi.useFakeTimers()
+    mockFastSuccessfulBuild()
+
+    mockCreateDeploymentContainer.mockImplementation(
+      ({
+        siteName,
+        abortSignal,
+      }: {
+        siteName: string
+        abortSignal?: AbortSignal
+      }) => {
+        if (siteName === "tenant-b-site-postbuild") {
+          return Promise.resolve({
+            id: "container-id",
+            name: siteName,
+            containerName: siteName,
+            image: "hosting/tenant-b-site-postbuild:x",
+            containerPort: 8080,
+            state: "running",
+            running: true,
+          })
+        }
+
+        return new Promise((_resolve, reject) => {
+          abortSignal?.addEventListener("abort", () => {
+            const abortError = new Error("aborted")
+            abortError.name = "AbortError"
+            reject(abortError)
+          })
+        })
+      },
+    )
+
+    const slowPromise = deployDeployment({
+      siteName: "tenant-a-site-postbuild",
+      repositoryUrl: "https://github.com/acme/tenant-a",
+      branch: "main",
+      tenantId: TENANT_ID,
+      deploymentTimeoutMs: 60_000,
+    })
+    slowPromise.catch(() => {})
+
+    const fastPromise = deployDeployment({
+      siteName: "tenant-b-site-postbuild",
+      repositoryUrl: "https://github.com/acme/tenant-b",
+      branch: "main",
+      tenantId: TENANT_ID,
+    })
+
+    await vi.advanceTimersByTimeAsync(0)
+
+    await expect(fastPromise).resolves.toMatchObject({
+      siteName: "tenant-b-site-postbuild",
+    })
+
+    await vi.advanceTimersByTimeAsync(31_000)
+
+    await expect(slowPromise).rejects.toThrow(DeploymentTimeoutError)
   })
 })

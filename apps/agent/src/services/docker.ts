@@ -54,6 +54,64 @@ export type CreateDeploymentContainerInput = {
   siteName: string
   imageName: string
   tenantId: string
+  /*
+   * Finding H1 (correction "timeout incomplet") : budget de temps
+   * restant pour TOUT le remplacement du container. Transmis à chaque
+   * opération dockerode qui le supporte nativement (create/start/
+   * inspect/list — vérifié dans @types/dockerode). `remove()` et
+   * `rename()` n'ont pas d'équivalent typé : voir
+   * withOperationTimeout() ci-dessous pour ces deux cas.
+   */
+  abortSignal?: AbortSignal
+}
+
+/*
+ * `container.remove()`/`.rename()` n'acceptent pas d'AbortSignal
+ * (vérifié dans @types/dockerode — contrairement à create/start/
+ * inspect/list, qui l'acceptent et sont donc annulées au niveau
+ * transport quand le signal se déclenche). Pour ces deux opérations,
+ * on borne seulement l'ATTENTE de l'Agent avec un timeout court et
+ * dédié : contrairement à une étape de build (contenu Dockerfile
+ * arbitraire, potentiellement conçu pour consommer des ressources
+ * indéfiniment), un remove/rename déjà envoyé au daemon ne peut pas
+ * faire grossir sa consommation de ressources en continuant en
+ * arrière-plan — au pire il échoue ou prend quelques secondes de
+ * plus. Ce n'est donc PAS l'anti-pattern d'un Promise.race qui
+ * abandonnerait la surveillance d'une opération potentiellement
+ * dangereuse : ici, l'opération abandonnée n'est structurellement pas
+ * dangereuse à laisser continuer, seulement à laisser bloquer notre
+ * propre attente.
+ */
+const REMOVE_RENAME_TIMEOUT_MS = 30_000
+
+/*
+ * Exportée pour être réutilisée par services/deployment.ts (finding
+ * H1, correction "timeout incomplet") : cleanupOldImages()/removeImage()
+ * y appellent aussi image.remove() et image.inspect(), qui n'acceptent
+ * pas d'AbortSignal typé — même raisonnement, même constante de délai.
+ */
+export async function withOperationTimeout<T>(
+  operation: () => Promise<T>,
+  timeoutMessage: string,
+): Promise<T> {
+  let timeoutHandle: ReturnType<typeof setTimeout>
+
+  const timeoutPromise = new Promise<never>(
+    (_resolve, reject) => {
+      timeoutHandle = setTimeout(() => {
+        reject(new Error(timeoutMessage))
+      }, REMOVE_RENAME_TIMEOUT_MS)
+    },
+  )
+
+  try {
+    return await Promise.race([
+      operation(),
+      timeoutPromise,
+    ])
+  } finally {
+    clearTimeout(timeoutHandle!)
+  }
 }
 
 function getContainerName(name: string) {
@@ -114,12 +172,14 @@ export function getTenantNetworkName(
 
 export async function ensureNetwork(
   networkName: string,
+  abortSignal?: AbortSignal,
 ) {
   const networks =
     await docker.listNetworks({
       filters: JSON.stringify({
         name: [networkName],
       }),
+      abortSignal,
     })
 
   const existingNetwork =
@@ -138,19 +198,25 @@ export async function ensureNetwork(
     Name: networkName,
     Driver: "bridge",
     CheckDuplicate: true,
+    abortSignal,
   })
 }
 
 async function ensureSiteNetworks(
   tenantId: string,
+  abortSignal?: AbortSignal,
 ) {
   const tenantNetwork =
     getTenantNetworkName(tenantId)
 
-  await ensureNetwork(tenantNetwork)
+  await ensureNetwork(
+    tenantNetwork,
+    abortSignal,
+  )
 
   await ensureNetwork(
     config.proxyNetwork,
+    abortSignal,
   )
 
   return tenantNetwork
@@ -158,6 +224,7 @@ async function ensureSiteNetworks(
 
 async function getContainerByExactName(
   containerName: string,
+  abortSignal?: AbortSignal,
 ) {
   const containers =
     await docker.listContainers({
@@ -167,6 +234,7 @@ async function getContainerByExactName(
           `^/${containerName}$`,
         ],
       }),
+      abortSignal,
     })
 
   if (containers.length === 0) {
@@ -432,6 +500,7 @@ export async function createDeploymentContainer({
   siteName,
   imageName,
   tenantId,
+  abortSignal,
 }: CreateDeploymentContainerInput) {
   validateSiteName(siteName)
   validateTenantId(tenantId)
@@ -455,11 +524,14 @@ export async function createDeploymentContainer({
   const existingContainer =
     await getContainerByExactName(
       containerName,
+      abortSignal,
     )
 
   if (existingContainer) {
     const existingInspect =
-      await existingContainer.inspect()
+      await existingContainer.inspect({
+        abortSignal,
+      })
 
     const existingTenant =
       existingInspect.Config?.Labels?.[
@@ -482,8 +554,16 @@ export async function createDeploymentContainer({
   const image =
     docker.getImage(imageName)
 
+  /*
+   * image.inspect() n'accepte pas d'AbortSignal typé (contrairement à
+   * container.inspect()) — simple lecture de métadonnées, bornée par
+   * un timeout court plutôt que laissée sans limite.
+   */
   const imageInspect =
-    await image.inspect()
+    await withOperationTimeout(
+      () => image.inspect(),
+      "Timeout lors de la lecture des métadonnées de l'image Docker.",
+    )
 
   /*
    * Récupère les ports exposés
@@ -534,7 +614,10 @@ export async function createDeploymentContainer({
   }
 
   const tenantNetwork =
-    await ensureSiteNetworks(tenantId)
+    await ensureSiteNetworks(
+      tenantId,
+      abortSignal,
+    )
 
   /*
    * Si un ancien container temporaire
@@ -544,13 +627,18 @@ export async function createDeploymentContainer({
   const oldTemporaryContainer =
     await getContainerByExactName(
       temporaryContainerName,
+      abortSignal,
     )
 
   if (oldTemporaryContainer) {
     try {
-      await oldTemporaryContainer.remove({
-        force: true,
-      })
+      await withOperationTimeout(
+        () =>
+          oldTemporaryContainer.remove({
+            force: true,
+          }),
+        `Timeout lors de la suppression du container temporaire "${temporaryContainerName}".`,
+      )
     } catch (error) {
       throw new Error(
         `Impossible de supprimer le container temporaire "${temporaryContainerName}".`,
@@ -638,18 +726,26 @@ export async function createDeploymentContainer({
         "traefik.enable":
           "false",
       },
+
+      abortSignal,
     })
 
   /*
    * Démarrage du nouveau container.
    */
   try {
-    await newContainer.start()
+    await newContainer.start({
+      abortSignal,
+    })
   } catch (error) {
     try {
-      await newContainer.remove({
-        force: true,
-      })
+      await withOperationTimeout(
+        () =>
+          newContainer.remove({
+            force: true,
+          }),
+        "Timeout lors du nettoyage du nouveau container après échec du démarrage.",
+      )
     } catch {
       // Nettoyage best-effort.
     }
@@ -667,15 +763,21 @@ export async function createDeploymentContainer({
    * Vérification du nouveau container.
    */
   let newInspect =
-    await newContainer.inspect()
+    await newContainer.inspect({
+      abortSignal,
+    })
 
   if (
     !newInspect.State?.Running
   ) {
     try {
-      await newContainer.remove({
-        force: true,
-      })
+      await withOperationTimeout(
+        () =>
+          newContainer.remove({
+            force: true,
+          }),
+        "Timeout lors du nettoyage du nouveau container non démarré.",
+      )
     } catch {
       // Nettoyage best-effort.
     }
@@ -691,6 +793,7 @@ export async function createDeploymentContainer({
   const oldContainer =
     await getContainerByExactName(
       containerName,
+      abortSignal,
     )
 
   /*
@@ -701,14 +804,22 @@ export async function createDeploymentContainer({
    */
   if (oldContainer) {
     try {
-      await oldContainer.remove({
-        force: true,
-      })
+      await withOperationTimeout(
+        () =>
+          oldContainer.remove({
+            force: true,
+          }),
+        `Timeout lors de la suppression de l'ancien container "${containerName}".`,
+      )
     } catch (error) {
       try {
-        await newContainer.remove({
-          force: true,
-        })
+        await withOperationTimeout(
+          () =>
+            newContainer.remove({
+              force: true,
+            }),
+          "Timeout lors du nettoyage du nouveau container après échec de la suppression de l'ancien.",
+        )
       } catch {
         // Nettoyage best-effort.
       }
@@ -724,9 +835,13 @@ export async function createDeploymentContainer({
    * le nom officiel du site.
    */
   try {
-    await newContainer.rename({
-      name: containerName,
-    })
+    await withOperationTimeout(
+      () =>
+        newContainer.rename({
+          name: containerName,
+        }),
+      "Timeout lors du renommage du nouveau container.",
+    )
   } catch (error) {
     /*
      * Le nouveau container fonctionne,
@@ -736,9 +851,13 @@ export async function createDeploymentContainer({
      * en supprimant le nouveau container.
      */
     try {
-      await newContainer.remove({
-        force: true,
-      })
+      await withOperationTimeout(
+        () =>
+          newContainer.remove({
+            force: true,
+          }),
+        "Timeout lors du nettoyage du nouveau container après échec du renommage.",
+      )
     } catch {
       // Nettoyage best-effort.
     }
@@ -758,6 +877,7 @@ export async function createDeploymentContainer({
   const finalContainer =
     await getContainerByExactName(
       containerName,
+      abortSignal,
     )
 
   if (!finalContainer) {
@@ -770,7 +890,9 @@ export async function createDeploymentContainer({
    * Vérification finale.
    */
   newInspect =
-    await finalContainer.inspect()
+    await finalContainer.inspect({
+      abortSignal,
+    })
 
   if (
     !newInspect.State?.Running

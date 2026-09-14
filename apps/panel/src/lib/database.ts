@@ -26,7 +26,7 @@ export type Queryer = {
   query<T extends QueryResultRow = QueryResultRow>(
     text: string,
     values?: unknown[],
-  ): Promise<{ rows: T[] }>
+  ): Promise<{ rows: T[]; rowCount: number | null }>
 }
 
 export async function checkDatabaseConnection() {

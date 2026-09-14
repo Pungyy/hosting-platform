@@ -2,6 +2,8 @@ import { z } from "zod"
 
 import {
   DeploymentTimeoutError,
+  MAX_DEPLOYMENT_TIMEOUT_MS,
+  MIN_DEPLOYMENT_TIMEOUT_MS,
   deployDeployment,
 } from "../services/deployment.js"
 
@@ -33,6 +35,21 @@ const buildDeploymentSchema =
       .string()
       .trim()
       .uuid("tenantId doit être un UUID valide."),
+
+    /*
+     * Finding H1 (correction "invariant 8 min / 15 min") : le Panel
+     * transmet le budget total qu'il a lui-même autorisé (voir
+     * AGENT_DEPLOYMENT_TIMEOUT_MS côté Panel). Optionnel (rétrocompat
+     * avec un appelant qui ne l'enverrait pas), mais toujours borné
+     * ici — l'Agent ne fait confiance à AUCUNE valeur reçue du Panel
+     * au-delà de ces bornes, quelle que soit son origine.
+     */
+    deploymentTimeoutMs: z
+      .number()
+      .int()
+      .min(MIN_DEPLOYMENT_TIMEOUT_MS)
+      .max(MAX_DEPLOYMENT_TIMEOUT_MS)
+      .optional(),
   })
 
 export async function buildDeploymentController(
@@ -80,6 +97,8 @@ export async function buildDeploymentController(
           parsed.data.branch,
         tenantId:
           parsed.data.tenantId,
+        deploymentTimeoutMs:
+          parsed.data.deploymentTimeoutMs,
       })
 
     return {
