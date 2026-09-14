@@ -160,6 +160,61 @@ describe("requireAgentToken", () => {
     expect(allLoggedArgs).not.toContain(PERMANENT_TOKEN)
   })
 
+  it("token propre valide, comparaison timing-safe -> accepté", async () => {
+    /*
+     * Régression du finding P1 #1 : requireAgentToken() utilisait `===`
+     * au lieu de safeCompare() (déjà utilisée par requireTraefikToken
+     * dans ce même fichier), une incohérence entre deux fonctions
+     * jumelles plutôt qu'une faille distincte.
+     */
+    vi.mocked(getAgentToken).mockReturnValue(PERMANENT_TOKEN)
+    const next = vi.fn()
+    const { c } = makeContext(`Bearer ${PERMANENT_TOKEN}`)
+
+    await requireAgentToken(c, next)
+
+    expect(next).toHaveBeenCalledTimes(1)
+  })
+
+  it("token incorrect de même longueur, comparaison timing-safe -> refusé (401)", async () => {
+    vi.mocked(getAgentToken).mockReturnValue(PERMANENT_TOKEN)
+    const next = vi.fn()
+    const sameLengthWrongToken =
+      "x".repeat(PERMANENT_TOKEN.length)
+    const { c, jsonCalls } = makeContext(
+      `Bearer ${sameLengthWrongToken}`,
+    )
+
+    await requireAgentToken(c, next)
+
+    expect(next).not.toHaveBeenCalled()
+    expect(jsonCalls).toEqual([
+      { body: { status: "error", message: "Token invalide" }, status: 401 },
+    ])
+  })
+
+  it("token de longueur différente -> refusé (401) sans lever d'exception", async () => {
+    /*
+     * timingSafeEqual() lève une RangeError si les deux buffers n'ont
+     * pas la même longueur — safeCompare() doit intercepter ce cas
+     * AVANT d'appeler timingSafeEqual, jamais laisser l'exception
+     * remonter (ce qui provoquerait un 500 au lieu d'un 401 propre).
+     */
+    vi.mocked(getAgentToken).mockReturnValue(PERMANENT_TOKEN)
+    const next = vi.fn()
+    const shorterToken = PERMANENT_TOKEN.slice(0, 5)
+    const { c, jsonCalls } = makeContext(`Bearer ${shorterToken}`)
+
+    await expect(
+      requireAgentToken(c, next),
+    ).resolves.not.toThrow()
+
+    expect(next).not.toHaveBeenCalled()
+    expect(jsonCalls).toEqual([
+      { body: { status: "error", message: "Token invalide" }, status: 401 },
+    ])
+  })
+
   it("TRAEFIK_TOKEN présenté sur une route normale (ex. /sites) -> refusé (401)", async () => {
     /*
      * TRAEFIK_TOKEN est un secret à part, réservé à GET

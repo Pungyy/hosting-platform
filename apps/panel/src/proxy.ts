@@ -16,6 +16,7 @@ import { SESSION_COOKIE_NAME } from "@/lib/auth/cookie"
  */
 const PUBLIC_API_ROUTES = [
   "/api/auth/login",
+  "/api/auth/logout",
   "/api/servers/authenticate",
   "/api/servers/enroll",
   "/api/servers/heartbeat",

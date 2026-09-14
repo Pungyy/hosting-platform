@@ -26,6 +26,8 @@ import {
 
 import { createSiteController } from "./controllers/sites.js"
 
+import { hostnameSchema } from "./services/hostname.js"
+
 import {
   deleteDatabase,
   executeDatabaseAction,
@@ -89,7 +91,7 @@ const siteDomainsSchema = z.object({
   domains: z
     .array(
       z.object({
-        domain: z.string().min(1),
+        domain: hostnameSchema,
         sslEnabled: z.boolean().optional(),
       }),
     )

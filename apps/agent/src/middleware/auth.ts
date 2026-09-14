@@ -52,7 +52,7 @@ export async function requireAgentToken(
    * d'accès permanente sur un agent déjà enrôlé.
    */
   if (permanentToken) {
-    if (token === permanentToken) {
+    if (safeCompare(token, permanentToken)) {
       await next()
       return
     }
@@ -72,7 +72,7 @@ export async function requireAgentToken(
    * local avant tout enrôlement formel.
    */
   if (
-    token === config.agentToken
+    safeCompare(token, config.agentToken)
   ) {
     await next()
     return
