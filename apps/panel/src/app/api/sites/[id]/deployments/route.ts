@@ -2,6 +2,7 @@ import { NextResponse } from "next/server"
 
 import { requireSession } from "@/lib/auth/guard"
 import { query } from "@/lib/database"
+import { apiErrorResponse } from "@/lib/http/api-error"
 import { getOwnedSite } from "@/lib/resources/sites"
 
 type RouteContext = {
@@ -69,22 +70,10 @@ export async function GET(
         deploymentsResult.rows,
     })
   } catch (error) {
-    console.error(
-      "GET /api/sites/[id]/deployments error:",
+    return apiErrorResponse(
       error,
-    )
-
-    return NextResponse.json(
-      {
-        status: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Impossible de récupérer les déploiements.",
-      },
-      {
-        status: 500,
-      },
+      "GET /api/sites/[id]/deployments error:",
+      "Impossible de récupérer les déploiements.",
     )
   }
 }

@@ -3,6 +3,7 @@ import { NextResponse } from "next/server"
 import { requireSession } from "@/lib/auth/guard"
 import { updateAgentSiteDomains } from "@/lib/agent/client"
 import { query } from "@/lib/database"
+import { ApiError, apiErrorResponse } from "@/lib/http/api-error"
 import { getOwnedSite } from "@/lib/resources/sites"
 
 type RouteContext = {
@@ -446,22 +447,10 @@ export async function PATCH(
         updatedDomain,
     })
   } catch (error) {
-    console.error(
-      "PATCH /api/sites/[id]/domains/[domainId] error:",
+    return apiErrorResponse(
       error,
-    )
-
-    return NextResponse.json(
-      {
-        status: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Impossible de modifier le domaine.",
-      },
-      {
-        status: 500,
-      },
+      "PATCH /api/sites/[id]/domains/[domainId] error:",
+      "Impossible de modifier le domaine.",
     )
   }
 }
@@ -622,8 +611,9 @@ export async function DELETE(
       if (
         domains.length === 0
       ) {
-        throw new Error(
+        throw new ApiError(
           "Un site doit conserver au moins un domaine.",
+          500,
         )
       }
 
@@ -690,22 +680,10 @@ export async function DELETE(
       domain,
     })
   } catch (error) {
-    console.error(
-      "DELETE /api/sites/[id]/domains/[domainId] error:",
+    return apiErrorResponse(
       error,
-    )
-
-    return NextResponse.json(
-      {
-        status: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Impossible de supprimer le domaine.",
-      },
-      {
-        status: 500,
-      },
+      "DELETE /api/sites/[id]/domains/[domainId] error:",
+      "Impossible de supprimer le domaine.",
     )
   }
 }

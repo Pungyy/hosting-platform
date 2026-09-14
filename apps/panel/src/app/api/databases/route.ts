@@ -10,6 +10,7 @@ import {
 } from "@/lib/agent/client"
 import { encryptSecret } from "@/lib/agent/crypto"
 import { query } from "@/lib/database"
+import { ApiError, apiErrorResponse } from "@/lib/http/api-error"
 
 const createDatabaseSchema = z.object({
   name: z
@@ -313,22 +314,19 @@ export async function POST(request: Request) {
       })
 
       if (!agentResponse.database) {
-        throw new Error(
+        throw new ApiError(
           "L'Agent n'a pas retourné les informations de la base.",
+          502,
         )
       }
 
       created = agentResponse.database
     } catch (agentError) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message:
-            agentError instanceof Error
-              ? agentError.message
-              : "Impossible de créer la base de données sur l'Agent.",
-        },
-        { status: 502 },
+      return apiErrorResponse(
+        agentError,
+        "POST /api/databases (agent) error:",
+        "Impossible de créer la base de données sur l'Agent.",
+        502,
       )
     }
 
@@ -410,17 +408,10 @@ export async function POST(request: Request) {
       )
     }
   } catch (error) {
-    console.error("POST /api/databases error:", error)
-
-    return NextResponse.json(
-      {
-        status: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Impossible de créer la base de données.",
-      },
-      { status: 500 },
+    return apiErrorResponse(
+      error,
+      "POST /api/databases error:",
+      "Impossible de créer la base de données.",
     )
   }
 }

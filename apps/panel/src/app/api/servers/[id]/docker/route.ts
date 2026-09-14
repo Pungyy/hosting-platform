@@ -2,6 +2,7 @@ import { NextResponse } from "next/server"
 import { requireSession } from "@/lib/auth/guard"
 import { requireAdmin } from "@/lib/auth/roles"
 import { getAgentDockerInfo } from "@/lib/agent/client"
+import { apiErrorResponse } from "@/lib/http/api-error"
 
 export async function GET(
   _request: Request,
@@ -22,20 +23,10 @@ export async function GET(
 
     return NextResponse.json(docker)
   } catch (error) {
-    console.error(
-      "GET /api/servers/[id]/docker error:",
+    return apiErrorResponse(
       error,
-    )
-
-    return NextResponse.json(
-      {
-        status: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Impossible de récupérer les informations Docker.",
-      },
-      { status: 500 },
+      "GET /api/servers/[id]/docker error:",
+      "Impossible de récupérer les informations Docker.",
     )
   }
 }

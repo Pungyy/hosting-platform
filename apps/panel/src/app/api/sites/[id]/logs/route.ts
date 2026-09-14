@@ -2,6 +2,7 @@ import { NextResponse } from "next/server"
 
 import { requireSession } from "@/lib/auth/guard"
 import { getAgentSiteLogs } from "@/lib/agent/client"
+import { apiErrorResponse } from "@/lib/http/api-error"
 import { getOwnedSite, type OwnedSite } from "@/lib/resources/sites"
 
 type RouteContext = {
@@ -48,32 +49,18 @@ export async function GET(
        * déploiement : on renvoie une erreur propre, non fatale
        * pour le polling du frontend.
        */
-      return NextResponse.json(
-        {
-          status: "error",
-          message:
-            agentError instanceof Error
-              ? agentError.message
-              : "Impossible de récupérer les logs.",
-        },
-        { status: 502 },
+      return apiErrorResponse(
+        agentError,
+        "GET /api/sites/[id]/logs (agent) error:",
+        "Impossible de récupérer les logs.",
+        502,
       )
     }
   } catch (error) {
-    console.error(
-      "GET /api/sites/[id]/logs error:",
+    return apiErrorResponse(
       error,
-    )
-
-    return NextResponse.json(
-      {
-        status: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Impossible de récupérer les logs.",
-      },
-      { status: 500 },
+      "GET /api/sites/[id]/logs error:",
+      "Impossible de récupérer les logs.",
     )
   }
 }

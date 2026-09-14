@@ -4,6 +4,7 @@ import { z } from "zod"
 import { requireSession } from "@/lib/auth/guard"
 import { deleteAgentSite } from "@/lib/agent/client"
 import { query } from "@/lib/database"
+import { apiErrorResponse } from "@/lib/http/api-error"
 import { getOwnedSite } from "@/lib/resources/sites"
 
 type RouteContext = {
@@ -168,20 +169,10 @@ export async function PATCH(
       site: updateResult.rows[0],
     })
   } catch (error) {
-    console.error(
-      "PATCH /api/sites/[id] error:",
+    return apiErrorResponse(
       error,
-    )
-
-    return NextResponse.json(
-      {
-        status: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Impossible de modifier le site.",
-      },
-      { status: 500 },
+      "PATCH /api/sites/[id] error:",
+      "Impossible de modifier le site.",
     )
   }
 }
@@ -202,15 +193,11 @@ export async function DELETE(
     try {
       await deleteAgentSite(site.server_id, site.name)
     } catch (agentError) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message:
-            agentError instanceof Error
-              ? agentError.message
-              : "Impossible de supprimer le site.",
-        },
-        { status: 502 },
+      return apiErrorResponse(
+        agentError,
+        "DELETE /api/sites/[id] (agent) error:",
+        "Impossible de supprimer le site.",
+        502,
       )
     }
 
@@ -228,22 +215,10 @@ export async function DELETE(
       site,
     })
   } catch (error) {
-    console.error(
-      "DELETE /api/sites/[id] error:",
+    return apiErrorResponse(
       error,
-    )
-
-    return NextResponse.json(
-      {
-        status: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Impossible de supprimer le site.",
-      },
-      {
-        status: 500,
-      },
+      "DELETE /api/sites/[id] error:",
+      "Impossible de supprimer le site.",
     )
   }
 }

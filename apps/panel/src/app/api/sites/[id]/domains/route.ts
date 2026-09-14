@@ -3,6 +3,7 @@ import { NextResponse } from "next/server"
 import { requireSession } from "@/lib/auth/guard"
 import { updateAgentSiteDomains } from "@/lib/agent/client"
 import { query } from "@/lib/database"
+import { apiErrorResponse } from "@/lib/http/api-error"
 import { getOwnedSite } from "@/lib/resources/sites"
 
 type RouteContext = {
@@ -124,22 +125,10 @@ export async function GET(
         domainsResult.rows,
     })
   } catch (error) {
-    console.error(
-      "GET /api/sites/[id]/domains error:",
+    return apiErrorResponse(
       error,
-    )
-
-    return NextResponse.json(
-      {
-        status: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Impossible de récupérer les domaines.",
-      },
-      {
-        status: 500,
-      },
+      "GET /api/sites/[id]/domains error:",
+      "Impossible de récupérer les domaines.",
     )
   }
 }
@@ -319,22 +308,10 @@ export async function POST(
       },
     )
   } catch (error) {
-    console.error(
-      "POST /api/sites/[id]/domains error:",
+    return apiErrorResponse(
       error,
-    )
-
-    return NextResponse.json(
-      {
-        status: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Impossible d'ajouter le domaine.",
-      },
-      {
-        status: 500,
-      },
+      "POST /api/sites/[id]/domains error:",
+      "Impossible d'ajouter le domaine.",
     )
   }
 }

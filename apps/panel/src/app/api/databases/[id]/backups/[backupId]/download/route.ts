@@ -3,6 +3,7 @@ import { NextResponse } from "next/server"
 import { requireSession } from "@/lib/auth/guard"
 import { downloadAgentDatabaseBackup } from "@/lib/agent/client"
 import { query } from "@/lib/database"
+import { apiErrorResponse } from "@/lib/http/api-error"
 import { getOwnedDatabase } from "@/lib/resources/databases"
 
 type RouteContext = {
@@ -72,15 +73,11 @@ export async function GET(
         backup.filename,
       )
     } catch (agentError) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message:
-            agentError instanceof Error
-              ? agentError.message
-              : "Impossible de récupérer la sauvegarde.",
-        },
-        { status: 502 },
+      return apiErrorResponse(
+        agentError,
+        "GET /api/databases/[id]/backups/[backupId]/download (agent) error:",
+        "Impossible de récupérer la sauvegarde.",
+        502,
       )
     }
 

@@ -3,6 +3,7 @@ import { NextResponse } from "next/server"
 import { requireSession } from "@/lib/auth/guard"
 import { agentSiteAction } from "@/lib/agent/client"
 import { query } from "@/lib/database"
+import { apiErrorResponse } from "@/lib/http/api-error"
 import { getOwnedSite, type OwnedSite } from "@/lib/resources/sites"
 
 type RouteContext = {
@@ -95,15 +96,11 @@ export async function POST(
     try {
       result = await performSiteAction(site, action)
     } catch (agentError) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message:
-            agentError instanceof Error
-              ? agentError.message
-              : "L'Agent a refusé l'action.",
-        },
-        { status: 502 },
+      return apiErrorResponse(
+        agentError,
+        "POST /api/sites/[id]/action (agent) error:",
+        "L'Agent a refusé l'action.",
+        502,
       )
     }
 
@@ -118,20 +115,10 @@ export async function POST(
       },
     })
   } catch (error) {
-    console.error(
-      "POST /api/sites/[id]/action error:",
+    return apiErrorResponse(
       error,
-    )
-
-    return NextResponse.json(
-      {
-        status: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Impossible d'exécuter l'action.",
-      },
-      { status: 500 },
+      "POST /api/sites/[id]/action error:",
+      "Impossible d'exécuter l'action.",
     )
   }
 }

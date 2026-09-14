@@ -9,6 +9,7 @@ import {
   getAgentSiteStatuses,
 } from "@/lib/agent/client"
 import { query } from "@/lib/database"
+import { apiErrorResponse } from "@/lib/http/api-error"
 
 const createSiteSchema = z.object({
   name: z
@@ -51,20 +52,10 @@ export async function GET(
 
     return NextResponse.json(result)
   } catch (error) {
-    console.error(
-      "GET /api/servers/[id]/sites error:",
+    return apiErrorResponse(
       error,
-    )
-
-    return NextResponse.json(
-      {
-        status: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Impossible de récupérer les sites.",
-      },
-      { status: 500 },
+      "GET /api/servers/[id]/sites error:",
+      "Impossible de récupérer les sites.",
     )
   }
 }
@@ -307,20 +298,10 @@ export async function POST(
       { status: 201 },
     )
   } catch (error) {
-    console.error(
-      "POST /api/servers/[id]/sites error:",
+    return apiErrorResponse(
       error,
-    )
-
-    return NextResponse.json(
-      {
-        status: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Impossible de créer le site.",
-      },
-      { status: 500 },
+      "POST /api/servers/[id]/sites error:",
+      "Impossible de créer le site.",
     )
   }
 }

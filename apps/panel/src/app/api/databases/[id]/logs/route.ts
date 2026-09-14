@@ -2,6 +2,7 @@ import { NextResponse } from "next/server"
 
 import { requireSession } from "@/lib/auth/guard"
 import { getAgentDatabaseLogs } from "@/lib/agent/client"
+import { apiErrorResponse } from "@/lib/http/api-error"
 import { getOwnedDatabase } from "@/lib/resources/databases"
 
 type RouteContext = {
@@ -37,32 +38,18 @@ export async function GET(
         logs: data.logs ?? "",
       })
     } catch (agentError) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message:
-            agentError instanceof Error
-              ? agentError.message
-              : "Impossible de récupérer les logs.",
-        },
-        { status: 502 },
+      return apiErrorResponse(
+        agentError,
+        "GET /api/databases/[id]/logs (agent) error:",
+        "Impossible de récupérer les logs.",
+        502,
       )
     }
   } catch (error) {
-    console.error(
-      "GET /api/databases/[id]/logs error:",
+    return apiErrorResponse(
       error,
-    )
-
-    return NextResponse.json(
-      {
-        status: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Impossible de récupérer les logs.",
-      },
-      { status: 500 },
+      "GET /api/databases/[id]/logs error:",
+      "Impossible de récupérer les logs.",
     )
   }
 }

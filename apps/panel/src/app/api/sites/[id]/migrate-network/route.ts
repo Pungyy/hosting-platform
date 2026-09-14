@@ -4,6 +4,7 @@ import { requireSession } from "@/lib/auth/guard"
 import { requireAdmin } from "@/lib/auth/roles"
 import { migrateAgentSiteNetwork } from "@/lib/agent/client"
 import { query } from "@/lib/database"
+import { apiErrorResponse } from "@/lib/http/api-error"
 
 type RouteContext = {
   params: Promise<{
@@ -65,20 +66,10 @@ export async function POST(
 
     return NextResponse.json({ status: "ok", migration })
   } catch (error) {
-    console.error(
-      "POST /api/sites/[id]/migrate-network error:",
+    return apiErrorResponse(
       error,
-    )
-
-    return NextResponse.json(
-      {
-        status: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Impossible de migrer le réseau du site.",
-      },
-      { status: 500 },
+      "POST /api/sites/[id]/migrate-network error:",
+      "Impossible de migrer le réseau du site.",
     )
   }
 }

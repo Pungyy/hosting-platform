@@ -4,6 +4,7 @@ import { requireSession } from "@/lib/auth/guard"
 import { deleteAgentDatabase } from "@/lib/agent/client"
 import { decryptSecret } from "@/lib/agent/crypto"
 import { query } from "@/lib/database"
+import { apiErrorResponse } from "@/lib/http/api-error"
 import { getOwnedDatabase } from "@/lib/resources/databases"
 
 type RouteContext = {
@@ -92,15 +93,11 @@ export async function DELETE(
     try {
       await deleteAgentDatabase(database.server_id, database.name)
     } catch (agentError) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message:
-            agentError instanceof Error
-              ? agentError.message
-              : "Impossible de supprimer la base de données.",
-        },
-        { status: 502 },
+      return apiErrorResponse(
+        agentError,
+        "DELETE /api/databases/[id] (agent) error:",
+        "Impossible de supprimer la base de données.",
+        502,
       )
     }
 
@@ -115,17 +112,10 @@ export async function DELETE(
       database: safeDatabase,
     })
   } catch (error) {
-    console.error("DELETE /api/databases/[id] error:", error)
-
-    return NextResponse.json(
-      {
-        status: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Impossible de supprimer la base de données.",
-      },
-      { status: 500 },
+    return apiErrorResponse(
+      error,
+      "DELETE /api/databases/[id] error:",
+      "Impossible de supprimer la base de données.",
     )
   }
 }

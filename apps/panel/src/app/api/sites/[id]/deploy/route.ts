@@ -3,6 +3,7 @@ import { NextResponse } from "next/server"
 import { deployAgentSite } from "@/lib/agent/client"
 import { requireSession } from "@/lib/auth/guard"
 import { query } from "@/lib/database"
+import { apiErrorResponse } from "@/lib/http/api-error"
 import { getOwnedSite } from "@/lib/resources/sites"
 
 type RouteContext = {
@@ -213,11 +214,6 @@ export async function POST(
       },
     })
   } catch (error) {
-    console.error(
-      "POST /api/sites/[id]/deploy error:",
-      error,
-    )
-
     /*
      * Si le deployment existe déjà,
      * on le marque comme failed.
@@ -251,17 +247,10 @@ export async function POST(
       )
     }
 
-    return NextResponse.json(
-      {
-        status: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Le déploiement a échoué.",
-      },
-      {
-        status: 500,
-      },
+    return apiErrorResponse(
+      error,
+      "POST /api/sites/[id]/deploy error:",
+      "Le déploiement a échoué.",
     )
   }
 }

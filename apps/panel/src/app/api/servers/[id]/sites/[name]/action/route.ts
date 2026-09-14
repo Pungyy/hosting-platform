@@ -4,6 +4,7 @@ import { requireSession } from "@/lib/auth/guard"
 import { requireAdmin } from "@/lib/auth/roles"
 import { agentSiteAction } from "@/lib/agent/client"
 import { query } from "@/lib/database"
+import { apiErrorResponse } from "@/lib/http/api-error"
 import { getOwnedSite } from "@/lib/resources/sites"
 import {
   ALLOWED_SITE_ACTIONS,
@@ -82,15 +83,11 @@ export async function POST(
           site: { ...site, status: siteStatus },
         })
       } catch (agentError) {
-        return NextResponse.json(
-          {
-            status: "error",
-            message:
-              agentError instanceof Error
-                ? agentError.message
-                : "Impossible d'exécuter l'action.",
-          },
-          { status: 502 },
+        return apiErrorResponse(
+          agentError,
+          "POST /api/servers/[id]/sites/[name]/action (agent) error:",
+          "Impossible d'exécuter l'action.",
+          502,
         )
       }
     }
@@ -106,32 +103,18 @@ export async function POST(
       const result = await agentSiteAction(serverId, name, action)
       return NextResponse.json(result)
     } catch (agentError) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message:
-            agentError instanceof Error
-              ? agentError.message
-              : "Impossible d'exécuter l'action.",
-        },
-        { status: 502 },
+      return apiErrorResponse(
+        agentError,
+        "POST /api/servers/[id]/sites/[name]/action (agent, orphelin) error:",
+        "Impossible d'exécuter l'action.",
+        502,
       )
     }
   } catch (error) {
-    console.error(
-      "POST /api/servers/[id]/sites/[name]/action error:",
+    return apiErrorResponse(
       error,
-    )
-
-    return NextResponse.json(
-      {
-        status: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Impossible d'exécuter l'action.",
-      },
-      { status: 500 },
+      "POST /api/servers/[id]/sites/[name]/action error:",
+      "Impossible d'exécuter l'action.",
     )
   }
 }

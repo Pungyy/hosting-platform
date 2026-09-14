@@ -4,6 +4,7 @@ import { requireSession } from "@/lib/auth/guard"
 import { requireAdmin } from "@/lib/auth/roles"
 import { getAgentSiteLogs } from "@/lib/agent/client"
 import { query } from "@/lib/database"
+import { apiErrorResponse } from "@/lib/http/api-error"
 import { getOwnedSite } from "@/lib/resources/sites"
 import { fetchSiteLogs } from "@/app/api/sites/[id]/logs/route"
 
@@ -50,15 +51,11 @@ export async function GET(
         const logs = await fetchSiteLogs(site)
         return NextResponse.json({ status: "ok", logs })
       } catch (agentError) {
-        return NextResponse.json(
-          {
-            status: "error",
-            message:
-              agentError instanceof Error
-                ? agentError.message
-                : "Impossible de récupérer les logs.",
-          },
-          { status: 502 },
+        return apiErrorResponse(
+          agentError,
+          "GET /api/servers/[id]/sites/[name]/logs (agent) error:",
+          "Impossible de récupérer les logs.",
+          502,
         )
       }
     }
@@ -73,32 +70,18 @@ export async function GET(
       const result = await getAgentSiteLogs(serverId, name)
       return NextResponse.json(result)
     } catch (agentError) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message:
-            agentError instanceof Error
-              ? agentError.message
-              : "Impossible de récupérer les logs.",
-        },
-        { status: 502 },
+      return apiErrorResponse(
+        agentError,
+        "GET /api/servers/[id]/sites/[name]/logs (agent, orphelin) error:",
+        "Impossible de récupérer les logs.",
+        502,
       )
     }
   } catch (error) {
-    console.error(
-      "GET /api/servers/[id]/sites/[name]/logs error:",
+    return apiErrorResponse(
       error,
-    )
-
-    return NextResponse.json(
-      {
-        status: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Impossible de récupérer les logs.",
-      },
-      { status: 500 },
+      "GET /api/servers/[id]/sites/[name]/logs error:",
+      "Impossible de récupérer les logs.",
     )
   }
 }

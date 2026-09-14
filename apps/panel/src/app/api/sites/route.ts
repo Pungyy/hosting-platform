@@ -9,6 +9,7 @@ import {
   getAgentSiteStatuses,
 } from "@/lib/agent/client"
 import { query } from "@/lib/database"
+import { ApiError, apiErrorResponse } from "@/lib/http/api-error"
 
 const createSiteSchema = z.object({
   name: z
@@ -325,22 +326,19 @@ export async function POST(request: Request) {
       })) as { site?: AgentCreatedSite }
 
       if (!agentResponse.site) {
-        throw new Error(
+        throw new ApiError(
           "L'Agent n'a pas retourné les informations du site.",
+          502,
         )
       }
 
       agentSite = agentResponse.site
     } catch (agentError) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message:
-            agentError instanceof Error
-              ? agentError.message
-              : "Impossible de créer le site sur l'Agent.",
-        },
-        { status: 502 },
+      return apiErrorResponse(
+        agentError,
+        "POST /api/sites (agent) error:",
+        "Impossible de créer le site sur l'Agent.",
+        502,
       )
     }
 
@@ -418,17 +416,10 @@ export async function POST(request: Request) {
       )
     }
   } catch (error) {
-    console.error("POST /api/sites error:", error)
-
-    return NextResponse.json(
-      {
-        status: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Impossible de créer le site.",
-      },
-      { status: 500 },
+    return apiErrorResponse(
+      error,
+      "POST /api/sites error:",
+      "Impossible de créer le site.",
     )
   }
 }

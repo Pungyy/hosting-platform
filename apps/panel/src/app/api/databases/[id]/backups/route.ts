@@ -3,6 +3,7 @@ import { NextResponse } from "next/server"
 import { requireSession } from "@/lib/auth/guard"
 import { createAgentDatabaseBackup } from "@/lib/agent/client"
 import { query } from "@/lib/database"
+import { apiErrorResponse } from "@/lib/http/api-error"
 import { getOwnedDatabase } from "@/lib/resources/databases"
 
 type RouteContext = {
@@ -137,15 +138,11 @@ export async function POST(
         ],
       )
 
-      return NextResponse.json(
-        {
-          status: "error",
-          message:
-            agentError instanceof Error
-              ? agentError.message
-              : "Impossible de créer la sauvegarde.",
-        },
-        { status: 502 },
+      return apiErrorResponse(
+        agentError,
+        "POST /api/databases/[id]/backups (agent) error:",
+        "Impossible de créer la sauvegarde.",
+        502,
       )
     }
 
@@ -185,8 +182,6 @@ export async function POST(
       { status: 201 },
     )
   } catch (error) {
-    console.error("POST /api/databases/[id]/backups error:", error)
-
     if (backupId) {
       await query(
         `
@@ -203,15 +198,10 @@ export async function POST(
       ).catch(() => {})
     }
 
-    return NextResponse.json(
-      {
-        status: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Impossible de créer la sauvegarde.",
-      },
-      { status: 500 },
+    return apiErrorResponse(
+      error,
+      "POST /api/databases/[id]/backups error:",
+      "Impossible de créer la sauvegarde.",
     )
   }
 }

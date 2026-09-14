@@ -3,6 +3,7 @@ import { NextResponse } from "next/server"
 import { requireSession } from "@/lib/auth/guard"
 import { deleteAgentDatabaseBackup } from "@/lib/agent/client"
 import { query } from "@/lib/database"
+import { apiErrorResponse } from "@/lib/http/api-error"
 import { getOwnedDatabase } from "@/lib/resources/databases"
 
 type RouteContext = {
@@ -66,15 +67,11 @@ export async function DELETE(
         backup.filename,
       )
     } catch (agentError) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message:
-            agentError instanceof Error
-              ? agentError.message
-              : "Impossible de supprimer la sauvegarde.",
-        },
-        { status: 502 },
+      return apiErrorResponse(
+        agentError,
+        "DELETE /api/databases/[id]/backups/[backupId] (agent) error:",
+        "Impossible de supprimer la sauvegarde.",
+        502,
       )
     }
 
@@ -85,20 +82,10 @@ export async function DELETE(
       message: "Sauvegarde supprimée.",
     })
   } catch (error) {
-    console.error(
-      "DELETE /api/databases/[id]/backups/[backupId] error:",
+    return apiErrorResponse(
       error,
-    )
-
-    return NextResponse.json(
-      {
-        status: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Impossible de supprimer la sauvegarde.",
-      },
-      { status: 500 },
+      "DELETE /api/databases/[id]/backups/[backupId] error:",
+      "Impossible de supprimer la sauvegarde.",
     )
   }
 }

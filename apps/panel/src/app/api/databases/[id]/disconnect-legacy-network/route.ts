@@ -4,6 +4,7 @@ import { requireSession } from "@/lib/auth/guard"
 import { requireAdmin } from "@/lib/auth/roles"
 import { disconnectAgentDatabaseLegacyNetwork } from "@/lib/agent/client"
 import { query } from "@/lib/database"
+import { apiErrorResponse } from "@/lib/http/api-error"
 
 type RouteContext = {
   params: Promise<{
@@ -59,20 +60,10 @@ export async function POST(
 
     return NextResponse.json({ status: "ok", migration })
   } catch (error) {
-    console.error(
-      "POST /api/databases/[id]/disconnect-legacy-network error:",
+    return apiErrorResponse(
       error,
-    )
-
-    return NextResponse.json(
-      {
-        status: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Impossible de déconnecter la base du réseau legacy.",
-      },
-      { status: 500 },
+      "POST /api/databases/[id]/disconnect-legacy-network error:",
+      "Impossible de déconnecter la base du réseau legacy.",
     )
   }
 }
