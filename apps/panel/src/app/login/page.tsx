@@ -128,7 +128,7 @@ export default function LoginPage() {
               Bon retour
             </h2>
             <p className="mt-1.5 text-sm text-muted-foreground">
-              Connectez-vous à votre espace d'administration.
+              Connectez-vous à votre espace d&apos;administration.
             </p>
           </div>
 

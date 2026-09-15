@@ -141,7 +141,7 @@ export default function NewServerPage() {
             </div>
 
             <div>
-              <h2 className="text-sm font-semibold">Enrôler l'Agent</h2>
+              <h2 className="text-sm font-semibold">Enrôler l&apos;Agent</h2>
               <p className="mt-1 text-sm text-muted-foreground">
                 Exécutez cette commande sur le VPS. Le token expire à{" "}
                 {expiresAt.toLocaleTimeString("fr-FR", {
@@ -155,7 +155,7 @@ export default function NewServerPage() {
             <div className="rounded-lg border border-border bg-muted/30 p-4">
               <div className="mb-2 flex items-center justify-between">
                 <span className="text-xs font-medium text-muted-foreground">
-                  Token d'enrôlement
+                  Token d&apos;enrôlement
                 </span>
                 <Button variant="secondary" size="sm" onClick={copyToken}>
                   {copied ? <Check /> : <Copy />}
@@ -185,7 +185,7 @@ pnpm enroll`}
               <TriangleAlert className="mt-0.5 size-4 shrink-0 text-warning-foreground" />
               <p className="text-muted-foreground">
                 Ce token est temporaire et ne doit pas être partagé. Une fois
-                l'Agent enrôlé, il recevra automatiquement son token permanent.
+                l&apos;Agent enrôlé, il recevra automatiquement son token permanent.
               </p>
             </div>
 

@@ -158,9 +158,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
   const [open, setOpen] = useState(false)
 
-  useEffect(() => {
+  // Ferme le tiroir mobile à chaque changement de route. Ajustement d'état
+  // pendant le rendu plutôt que dans un effet (cf. react.dev "Storing
+  // information from previous renders") : évite un rendu en cascade tout en
+  // se déclenchant sur exactement le même événement (tout changement de
+  // pathname), quelle qu'en soit l'origine (lien de la sidebar, retour
+  // navigateur, etc.) — comportement UI identique à l'ancien useEffect.
+  const [previousPathname, setPreviousPathname] = useState(pathname)
+  if (pathname !== previousPathname) {
+    setPreviousPathname(pathname)
     setOpen(false)
-  }, [pathname])
+  }
 
   useEffect(() => {
     if (!open) {

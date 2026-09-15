@@ -68,6 +68,10 @@ export default function DomainsPage() {
   }
 
   useEffect(() => {
+    // Rafraîchissement périodique volontaire (voir chantier lint M3-4bis) :
+    // synchronisation avec une ressource externe (l'API), pas un rendu en
+    // cascade — setState n'a lieu qu'après l'await du fetch.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadDomains()
     const interval = setInterval(loadDomains, 15000)
     return () => clearInterval(interval)
@@ -210,7 +214,7 @@ export default function DomainsPage() {
         <CardHeader>
           <CardTitle>Tous les domaines</CardTitle>
           <CardDescription>
-            Le domaine principal d'affichage, l'état SSL et le site associé.
+            Le domaine principal d&apos;affichage, l&apos;état SSL et le site associé.
             Pour ajouter un domaine, passez par la page du site.
           </CardDescription>
         </CardHeader>

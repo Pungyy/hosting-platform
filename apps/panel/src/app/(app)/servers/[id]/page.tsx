@@ -364,12 +364,20 @@ export default function ServerDetailPage() {
   }, [id])
 
   useEffect(() => {
+    // Rafraîchissement périodique volontaire (voir chantier lint M3-4bis) :
+    // synchronisation avec une ressource externe (l'API), pas un rendu en
+    // cascade — setState n'a lieu qu'après l'await du fetch.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadServer()
     const interval = setInterval(() => loadServer(), 10_000)
     return () => clearInterval(interval)
   }, [loadServer])
 
   useEffect(() => {
+    // Rafraîchissement périodique volontaire (voir chantier lint M3-4bis) :
+    // synchronisation avec une ressource externe (l'API), pas un rendu en
+    // cascade — setState n'a lieu qu'après l'await du fetch.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadDocker()
     const interval = setInterval(() => loadDocker(), 10_000)
     return () => clearInterval(interval)
@@ -605,10 +613,10 @@ export default function ServerDetailPage() {
 
             <div className="min-w-0 flex-1">
               <h2 className="text-sm font-semibold">
-                Token d'enrôlement généré
+                Token d&apos;enrôlement généré
               </h2>
               <p className="mt-1 text-xs text-muted-foreground">
-                Ce token est temporaire et doit être utilisé depuis l'Agent du
+                Ce token est temporaire et doit être utilisé depuis l&apos;Agent du
                 VPS.
               </p>
 
@@ -619,7 +627,7 @@ export default function ServerDetailPage() {
               <div className="mt-4 flex gap-3 rounded-lg border border-warning/25 bg-warning/5 p-3 text-xs text-muted-foreground">
                 <TriangleAlert className="mt-0.5 size-3.5 shrink-0 text-warning-foreground" />
                 Ne partagez pas ce token. Il est destiné uniquement à
-                l'enrôlement de cet Agent.
+                l&apos;enrôlement de cet Agent.
               </div>
             </div>
           </CardContent>
@@ -669,7 +677,7 @@ export default function ServerDetailPage() {
           <CardHeader>
             <CardTitle>Informations système</CardTitle>
             <CardDescription>
-              Configuration et état de l'Agent.
+              Configuration et état de l&apos;Agent.
             </CardDescription>
           </CardHeader>
 

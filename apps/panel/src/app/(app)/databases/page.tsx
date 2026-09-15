@@ -150,6 +150,10 @@ export default function DatabasesPage() {
   }
 
   useEffect(() => {
+    // Rafraîchissement périodique volontaire (voir chantier lint M3-4bis) :
+    // synchronisation avec une ressource externe (l'API), pas un rendu en
+    // cascade — setState n'a lieu qu'après l'await du fetch.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadDatabases()
 
     const interval = setInterval(() => {
