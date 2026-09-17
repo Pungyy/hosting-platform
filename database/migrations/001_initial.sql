@@ -208,15 +208,15 @@ CREATE INDEX idx_deployments_created_at
 -- ============================================================
 
 GRANT USAGE ON SCHEMA public
-    TO hosting_platform_user;
+    TO hosting_platform_app;
 
 GRANT SELECT, INSERT, UPDATE, DELETE
     ON ALL TABLES IN SCHEMA public
-    TO hosting_platform_user;
+    TO hosting_platform_app;
 
 ALTER DEFAULT PRIVILEGES
-    FOR ROLE regardscroises
+    FOR ROLE hosting_platform_migrator
     IN SCHEMA public
     GRANT SELECT, INSERT, UPDATE, DELETE
     ON TABLES
-    TO hosting_platform_user;
+    TO hosting_platform_app;

@@ -10,14 +10,14 @@ import { Pool } from "pg"
  * mal configurée.
  *
  * hosting_platform_test_user / hosting_platform_test sont un rôle et une
- * base Postgres séparés de hosting_platform_user / hosting_platform :
+ * base Postgres séparés de hosting_platform_app / hosting_platform :
  *   - NOSUPERUSER, NOCREATEDB, NOCREATEROLE.
  *   - Aucun privilège sur le schéma ou les tables de hosting_platform,
  *     vérifié empiriquement (`SELECT * FROM users` échoue avec
  *     « permission denied for table users »).
  *   - Particularité connue et acceptée : ce rôle peut techniquement
  *     ouvrir une connexion à hosting_platform (CONNECT hérité de PUBLIC,
- *     jamais retiré pour ne pas risquer l'accès de hosting_platform_user)
+ *     jamais retiré pour ne pas risquer l'accès de hosting_platform_app)
  *     — sans que ça lui donne accès à la moindre donnée.
  *   - Ce pool n'est utilisé que par les tests, jamais par du code
  *     applicatif servant de vraies requêtes.

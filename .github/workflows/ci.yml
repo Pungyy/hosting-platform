@@ -96,30 +96,33 @@ jobs:
           done
 
           # Reproduit le modèle de rôles réellement utilisé en
-          # développement (voir finding M3-1) :
-          #   - regardscroises : possède la base de test et applique les
-          #     migrations. Les migrations 001 et 013 référencent ce nom
-          #     littéralement dans des ALTER DEFAULT PRIVILEGES — le rôle
-          #     qui migre DOIT donc s'appeler exactement "regardscroises",
-          #     sans quoi ces instructions échoueraient ou s'appliquer-
-          #     aient à un rôle sans rapport.
-          #   - hosting_platform_user : doit exister car la migration 001
-          #     lui accorde des droits (GRANT ... TO hosting_platform_user)
+          # développement/production (voir findings M3-1 et correction
+          # de nomenclature ultérieure) :
+          #   - hosting_platform_migrator : possède la base de test et
+          #     applique les migrations. Les migrations 001 et 013
+          #     référencent ce nom littéralement dans des ALTER DEFAULT
+          #     PRIVILEGES — le rôle qui migre DOIT donc s'appeler
+          #     exactement "hosting_platform_migrator", sans quoi ces
+          #     instructions échoueraient ou s'appliqueraient à un rôle
+          #     sans rapport.
+          #   - hosting_platform_app : doit exister car la migration 001
+          #     lui accorde des droits (GRANT ... TO hosting_platform_app)
           #     — jamais utilisé par les tests eux-mêmes, mais nécessaire
           #     pour que la migration s'applique sans erreur.
           #   - hosting_platform_test_user : le rôle NON privilégié
           #     (NOSUPERUSER NOCREATEDB NOCREATEROLE) réellement utilisé
           #     par la suite de tests d'intégration (TEST_DATABASE_USER).
-          # "regardscroises" n'a besoin d'aucun privilège élevé : il est
-          # propriétaire de la base (OWNER), ce qui suffit pour créer des
-          # tables, leur accorder des droits, et fixer ses propres
+          # "hosting_platform_migrator" n'a besoin d'aucun privilège élevé :
+          # il est propriétaire de la base (OWNER), ce qui suffit pour créer
+          # des tables, leur accorder des droits, et fixer ses propres
           # privilèges par défaut (ALTER DEFAULT PRIVILEGES FOR ROLE
-          # regardscroises est toujours permis sur son propre rôle).
+          # hosting_platform_migrator est toujours permis sur son propre
+          # rôle).
           psql -h 127.0.0.1 -p 5432 -U postgres -d postgres -v ON_ERROR_STOP=1 \
-            -c "CREATE ROLE regardscroises WITH LOGIN PASSWORD 'ci_test_password';" \
-            -c "CREATE ROLE hosting_platform_user WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD 'ci_test_password';" \
+            -c "CREATE ROLE hosting_platform_migrator WITH LOGIN PASSWORD 'ci_test_password';" \
+            -c "CREATE ROLE hosting_platform_app WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD 'ci_test_password';" \
             -c "CREATE ROLE hosting_platform_test_user WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD 'ci_test_password';" \
-            -c "CREATE DATABASE hosting_platform_test OWNER regardscroises;"
+            -c "CREATE DATABASE hosting_platform_test OWNER hosting_platform_migrator;"
 
       - name: Apply migrations 001 -> 014
         env:
@@ -128,7 +131,7 @@ jobs:
           set -euo pipefail
           for migration in database/migrations/*.sql; do
             echo "Applying $migration"
-            psql -h 127.0.0.1 -p 5432 -U regardscroises -d hosting_platform_test -v ON_ERROR_STOP=1 -f "$migration"
+            psql -h 127.0.0.1 -p 5432 -U hosting_platform_migrator -d hosting_platform_test -v ON_ERROR_STOP=1 -f "$migration"
           done
 
           # Complète, pour les tables ANTÉRIEURES à la migration 013, ce
@@ -140,7 +143,7 @@ jobs:
           # manuel hors version, jamais capturé dans les migrations
           # elles-mêmes). Exécuté une seule fois, après toutes les
           # migrations connues à ce jour.
-          psql -h 127.0.0.1 -p 5432 -U regardscroises -d hosting_platform_test -v ON_ERROR_STOP=1 \
+          psql -h 127.0.0.1 -p 5432 -U hosting_platform_migrator -d hosting_platform_test -v ON_ERROR_STOP=1 \
             -c "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO hosting_platform_test_user;"
 
       - name: Verify schema and permissions on a fresh database
@@ -153,7 +156,7 @@ jobs:
           # 014) : si l'une manque, une migration a échoué silencieusement
           # ou a été appliquée dans le désordre.
           for table in users servers sites domains deployments databases backups user_resource_quotas tenant_deployment_slots; do
-            exists=$(psql -h 127.0.0.1 -p 5432 -U regardscroises -d hosting_platform_test -tAc \
+            exists=$(psql -h 127.0.0.1 -p 5432 -U hosting_platform_migrator -d hosting_platform_test -tAc \
               "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='$table';")
             if [ "$exists" != "1" ]; then
               echo "Table manquante après application des migrations : $table" >&2

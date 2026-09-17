@@ -63,9 +63,9 @@ ON CONFLICT (user_id, resource_type) DO NOTHING;
 -- Reproductibilité de l'environnement de test (revue indépendante)
 -- ============================================================
 --
--- Constat : contrairement à hosting_platform_user (base de dev/prod,
--- couvert par l'ALTER DEFAULT PRIVILEGES FOR ROLE regardscroises de la
--- migration 001), AUCUNE règle de privilèges par défaut n'a jamais
+-- Constat : contrairement à hosting_platform_app (base de dev/prod,
+-- couvert par l'ALTER DEFAULT PRIVILEGES FOR ROLE hosting_platform_migrator
+-- de la migration 001), AUCUNE règle de privilèges par défaut n'a jamais
 -- existé pour hosting_platform_test_user dans hosting_platform_test
 -- (vérifié : SELECT * FROM pg_default_acl y renvoie 0 ligne). Chaque
 -- nouvelle table créée par une migration (002 à 012) a donc nécessité
@@ -95,10 +95,11 @@ BEGIN
                 'TO hosting_platform_test_user';
 
         -- Mécanisme permanent : toute table créée PAR LA SUITE par
-        -- regardscroises dans hosting_platform_test (migrations 014+)
-        -- accorde désormais automatiquement ces privilèges, sans
-        -- nécessiter à nouveau un GRANT manuel hors version.
-        EXECUTE 'ALTER DEFAULT PRIVILEGES FOR ROLE regardscroises ' ||
+        -- hosting_platform_migrator dans hosting_platform_test
+        -- (migrations 014+) accorde désormais automatiquement ces
+        -- privilèges, sans nécessiter à nouveau un GRANT manuel hors
+        -- version.
+        EXECUTE 'ALTER DEFAULT PRIVILEGES FOR ROLE hosting_platform_migrator ' ||
                 'IN SCHEMA public ' ||
                 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES ' ||
                 'TO hosting_platform_test_user';
