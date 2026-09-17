@@ -5,7 +5,7 @@ import {
   Boxes,
   Eye,
   EyeOff,
-  LockKeyhole,
+  UserPlus,
 } from "lucide-react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
@@ -15,11 +15,12 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 
-export default function LoginPage() {
+export default function RegisterPage() {
   const router = useRouter()
 
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
+  const [confirmPassword, setConfirmPassword] = useState("")
   const [showPassword, setShowPassword] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -28,30 +29,37 @@ export default function LoginPage() {
     event.preventDefault()
 
     setError(null)
+
+    if (password !== confirmPassword) {
+      setError("La confirmation du mot de passe ne correspond pas.")
+      return
+    }
+
     setLoading(true)
 
     try {
-      const response = await fetch("/api/auth/login", {
+      const response = await fetch("/api/auth/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ email, password, confirmPassword }),
       })
 
       const data = await response.json()
 
       if (!response.ok) {
         throw new Error(
-          data.message || "Adresse email ou mot de passe incorrect."
+          data.message || "Impossible de créer le compte."
         )
       }
 
+      // Connexion automatique : la route a déjà posé le cookie de session.
       router.push("/")
       router.refresh()
     } catch (err) {
       setError(
         err instanceof Error
           ? err.message
-          : "Une erreur est survenue lors de la connexion."
+          : "Une erreur est survenue lors de l'inscription."
       )
     } finally {
       setLoading(false)
@@ -123,13 +131,13 @@ export default function LoginPage() {
 
           <div className="mb-8">
             <span className="flex size-11 items-center justify-center rounded-xl bg-muted text-muted-foreground [&_svg]:size-5">
-              <LockKeyhole />
+              <UserPlus />
             </span>
             <h2 className="mt-5 font-heading text-2xl font-semibold tracking-tight">
-              Bon retour
+              Créer un compte
             </h2>
             <p className="mt-1.5 text-sm text-muted-foreground">
-              Connectez-vous à votre espace d&apos;administration.
+              Créez votre espace d&apos;administration.
             </p>
           </div>
 
@@ -149,7 +157,7 @@ export default function LoginPage() {
                 type="email"
                 value={email}
                 onChange={(event) => setEmail(event.target.value)}
-                placeholder="admin@hosting.local"
+                placeholder="vous@exemple.com"
                 autoComplete="email"
                 required
                 disabled={loading}
@@ -167,9 +175,10 @@ export default function LoginPage() {
                   type={showPassword ? "text" : "password"}
                   value={password}
                   onChange={(event) => setPassword(event.target.value)}
-                  placeholder="Votre mot de passe"
-                  autoComplete="current-password"
+                  placeholder="8 caractères minimum"
+                  autoComplete="new-password"
                   required
+                  minLength={8}
                   disabled={loading}
                   className="h-10 pr-10"
                 />
@@ -193,20 +202,37 @@ export default function LoginPage() {
               </div>
             </div>
 
+            <div className="space-y-2">
+              <label htmlFor="confirmPassword" className="text-sm font-medium">
+                Confirmer le mot de passe
+              </label>
+              <Input
+                id="confirmPassword"
+                type={showPassword ? "text" : "password"}
+                value={confirmPassword}
+                onChange={(event) => setConfirmPassword(event.target.value)}
+                placeholder="Retapez votre mot de passe"
+                autoComplete="new-password"
+                required
+                disabled={loading}
+                className="h-10"
+              />
+            </div>
+
             <Button
               type="submit"
               size="lg"
-              disabled={loading || !email || !password}
+              disabled={loading || !email || !password || !confirmPassword}
               className="group w-full"
             >
               {loading ? (
                 <>
                   <Spinner className="text-current" />
-                  Connexion…
+                  Création du compte…
                 </>
               ) : (
                 <>
-                  Se connecter
+                  Créer mon compte
                   <ArrowRight className="transition-transform group-hover:translate-x-0.5" />
                 </>
               )}
@@ -214,12 +240,12 @@ export default function LoginPage() {
           </form>
 
           <p className="mt-8 text-center text-xs text-muted-foreground">
-            Pas encore de compte ?{" "}
+            Déjà un compte ?{" "}
             <Link
-              href="/register"
+              href="/login"
               className="font-medium text-foreground underline-offset-4 hover:underline"
             >
-              Créer un compte
+              Se connecter
             </Link>
           </p>
         </div>

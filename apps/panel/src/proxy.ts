@@ -17,10 +17,19 @@ import { SESSION_COOKIE_NAME } from "@/lib/auth/cookie"
 const PUBLIC_API_ROUTES = [
   "/api/auth/login",
   "/api/auth/logout",
+  "/api/auth/register",
   "/api/servers/authenticate",
   "/api/servers/enroll",
   "/api/servers/heartbeat",
 ]
+
+/*
+ * Pages accessibles sans session : login et inscription. Un utilisateur
+ * déjà authentifié qui y accède est renvoyé vers "/" (voir plus bas) —
+ * même règle pour les deux, pas de raison de rester sur une page
+ * d'authentification une fois connecté.
+ */
+const PUBLIC_PAGES = ["/login", "/register"]
 
 function isPublicApiRoute(pathname: string) {
   return PUBLIC_API_ROUTES.some(
@@ -39,7 +48,7 @@ export default function proxy(request: NextRequest) {
   }
 
   if (hasSession) {
-    if (pathname === "/login") {
+    if (PUBLIC_PAGES.includes(pathname)) {
       return NextResponse.redirect(new URL("/", request.nextUrl))
     }
 
@@ -56,7 +65,7 @@ export default function proxy(request: NextRequest) {
     )
   }
 
-  if (pathname === "/login") {
+  if (PUBLIC_PAGES.includes(pathname)) {
     return NextResponse.next()
   }
 

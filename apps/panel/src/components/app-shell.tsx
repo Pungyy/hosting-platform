@@ -1,7 +1,7 @@
 "use client"
 
 import Link from "next/link"
-import { usePathname } from "next/navigation"
+import { usePathname, useRouter } from "next/navigation"
 import { useEffect, useState } from "react"
 import {
   Boxes,
@@ -9,6 +9,7 @@ import {
   Globe,
   HardDrive,
   LayoutDashboard,
+  LogOut,
   Menu,
   Rocket,
   Server,
@@ -17,6 +18,14 @@ import {
 } from "lucide-react"
 
 import { cn } from "cn"
+
+import { Spinner } from "@/components/ui/spinner"
+
+type AppUser = {
+  name: string
+  email: string
+  role: "user" | "admin"
+}
 
 type NavItem = {
   href: string
@@ -126,35 +135,104 @@ function SidebarNav({ pathname }: { pathname: string }) {
   )
 }
 
-function SidebarUser() {
+function initialsOf(name: string) {
+  const initials = name
+    .trim()
+    .split(/\s+/)
+    .map((part) => part[0])
+    .filter(Boolean)
+    .slice(0, 2)
+    .join("")
+    .toUpperCase()
+
+  return initials || "?"
+}
+
+function SidebarUser({ user }: { user: AppUser }) {
+  const router = useRouter()
+  const [loggingOut, setLoggingOut] = useState(false)
+
+  /*
+   * Finding auth (complétion UI) — vraie déconnexion : appelle
+   * systématiquement l'API (jamais une simple suppression locale du
+   * cookie), qui révoque la session côté serveur avant d'effacer le
+   * cookie. La redirection + router.refresh() ont lieu dans TOUS les
+   * cas (y compris si le fetch échoue réseau) : POST /api/auth/logout
+   * est déjà conçue pour être sûre/idempotente et l'utilisateur ne doit
+   * jamais rester bloqué sur une page protégée à cause d'une erreur
+   * réseau ponctuelle — au pire, il retombe sur /login et devra se
+   * reconnecter, jamais l'inverse (rester connecté visuellement sans
+   * session serveur valide).
+   */
+  const handleLogout = async () => {
+    setLoggingOut(true)
+
+    try {
+      await fetch("/api/auth/logout", { method: "POST" })
+    } catch (error) {
+      console.error("Erreur lors de la déconnexion :", error)
+    } finally {
+      router.push("/login")
+      router.refresh()
+    }
+  }
+
   return (
-    <div className="border-t border-sidebar-border p-3">
+    <div className="space-y-2 border-t border-sidebar-border p-3">
       <div className="flex items-center gap-3 rounded-lg px-2 py-2">
-        <span className="flex size-8 items-center justify-center rounded-full bg-muted text-xs font-semibold text-foreground">
-          IA
+        <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-semibold text-foreground">
+          {initialsOf(user.name)}
         </span>
         <div className="min-w-0 leading-tight">
-          <p className="truncate text-sm font-medium">Ibrahim</p>
-          <p className="truncate text-xs text-muted-foreground">Administrateur</p>
+          <p className="truncate text-sm font-medium">{user.name}</p>
+          <p className="truncate text-xs text-muted-foreground">
+            {user.role === "admin" ? "Administrateur" : "Utilisateur"}
+          </p>
         </div>
       </div>
+
+      <button
+        type="button"
+        onClick={handleLogout}
+        disabled={loggingOut}
+        className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent/60 hover:text-foreground disabled:opacity-50"
+      >
+        {loggingOut ? (
+          <Spinner className="text-current" />
+        ) : (
+          <LogOut className="size-4" />
+        )}
+        Se déconnecter
+      </button>
     </div>
   )
 }
 
-function SidebarContent({ pathname }: { pathname: string }) {
+function SidebarContent({
+  pathname,
+  user,
+}: {
+  pathname: string
+  user: AppUser
+}) {
   return (
     <>
       <div className="flex h-14 items-center px-5">
         <Brand />
       </div>
       <SidebarNav pathname={pathname} />
-      <SidebarUser />
+      <SidebarUser user={user} />
     </>
   )
 }
 
-export function AppShell({ children }: { children: React.ReactNode }) {
+export function AppShell({
+  children,
+  user,
+}: {
+  children: React.ReactNode
+  user: AppUser
+}) {
   const pathname = usePathname()
   const [open, setOpen] = useState(false)
 
@@ -189,7 +267,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     <div className="min-h-screen bg-background">
       {/* Desktop sidebar */}
       <aside className="fixed inset-y-0 left-0 z-40 hidden w-64 flex-col border-r border-sidebar-border bg-sidebar lg:flex">
-        <SidebarContent pathname={pathname} />
+        <SidebarContent pathname={pathname} user={user} />
       </aside>
 
       {/* Mobile drawer */}
@@ -209,7 +287,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             >
               <X className="size-4" />
             </button>
-            <SidebarContent pathname={pathname} />
+            <SidebarContent pathname={pathname} user={user} />
           </aside>
         </div>
       )}
