@@ -16,5 +16,9 @@ coverage/
 # Configuration dynamique Traefik : état runtime écrit par l'Agent
 docker/traefik/dynamic.json
 
+# Configuration statique Traefik générée localement + certificats ACME
+docker/traefik/traefik.yml
+docker/traefik/letsencrypt/
+
 # Sauvegardes de bases de données écrites sur disque par l'Agent
 apps/agent/data/
