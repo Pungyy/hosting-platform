@@ -162,7 +162,7 @@ jobs:
           done
           echo "Toutes les tables attendues existent (migrations 001 -> 014 appliquées)."
 
-          is_superuser=$(psql -h 127.0.0.1 -p 5432 -U postgres -d postgres -tAc \
+          is_superuser=$(PGPASSWORD=postgres psql -h 127.0.0.1 -p 5432 -U postgres -d postgres -tAc \
             "SELECT rolsuper FROM pg_roles WHERE rolname='hosting_platform_test_user';")
           if [ "$is_superuser" != "f" ]; then
             echo "hosting_platform_test_user ne doit JAMAIS être superuser (rolsuper=$is_superuser)." >&2
