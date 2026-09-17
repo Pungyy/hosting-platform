@@ -1,0 +1,73 @@
+# PostgreSQL de production — base de contrôle du Panel (hosting_platform).
+#
+# Aucun port publié : joignable uniquement depuis le réseau Docker interne
+# `hosting-platform-internal` (créé avec --internal, pas de sortie possible
+# vers Internet depuis ce réseau). Le futur container Panel devra rejoindre
+# ce réseau (en plus de `hosting-proxy` pour Traefik) pour s'y connecter via
+# DATABASE_HOST=hosting-platform-postgres / DATABASE_PORT=5432.
+#
+# POSTGRES_USER=postgres : rôle bootstrap du cluster (créé par initdb).
+# PostgreSQL interdit structurellement de retirer SUPERUSER à ce rôle
+# précis ("the bootstrap user must have the SUPERUSER attribute") — il
+# reste donc superuser en permanence, mais c'est inhérent à Postgres,
+# jamais un rôle du projet ni utilisé par le Panel. hosting_platform_app
+# et hosting_platform_migrator sont créés SÉPARÉMENT après coup (voir le
+# rapport d'installation), hosting_platform_migrator étant NOSUPERUSER
+# dès sa création — jamais superuser, à aucun moment.
+#
+# Prérequis (créés une seule fois, jamais recréés par ce compose) :
+#   docker network create --internal hosting-platform-internal
+#   docker volume create hosting-platform-postgres-data
+#
+# Démarrage :
+#   cp .env.example .env   # puis renseigner de vrais mots de passe (openssl rand -hex 32)
+#   docker compose up -d
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: hosting-platform-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB manquant — copiez .env.example vers .env}
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_ROOT_PASSWORD:?POSTGRES_ROOT_PASSWORD manquant}
+      # Consommées uniquement par init/01-bootstrap-roles.sh (exécuté par
+      # l'image UNIQUEMENT à la toute première initialisation du volume) —
+      # jamais utilisées comme POSTGRES_USER (le bootstrap reste "postgres").
+      POSTGRES_MIGRATOR_USER: ${POSTGRES_MIGRATOR_USER:?POSTGRES_MIGRATOR_USER manquant}
+      POSTGRES_MIGRATOR_PASSWORD: ${POSTGRES_MIGRATOR_PASSWORD:?POSTGRES_MIGRATOR_PASSWORD manquant}
+      POSTGRES_APP_USER: ${POSTGRES_APP_USER:?POSTGRES_APP_USER manquant}
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:?POSTGRES_APP_PASSWORD manquant}
+    volumes:
+      - hosting-platform-postgres-data:/var/lib/postgresql/data
+      # Lecture seule : ce script ne doit jamais pouvoir être modifié
+      # depuis l'intérieur du container. Mécanisme natif de l'image
+      # officielle PostgreSQL — exécuté une seule fois, uniquement si le
+      # volume ci-dessus est initialisé pour la première fois (vide).
+      - ./init/01-bootstrap-roles.sh:/docker-entrypoint-initdb.d/01-bootstrap-roles.sh:ro
+    networks:
+      - hosting-platform-internal
+    # Aucune section "ports" : jamais de publication sur l'hôte.
+    healthcheck:
+      # pg_isready s'exécute DANS le container (socket local) — ne
+      # nécessite aucun port publié sur l'hôte. Vérifie réellement que
+      # PostgreSQL accepte les connexions sur la base hosting_platform,
+      # pas seulement que le process a démarré.
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+networks:
+  hosting-platform-internal:
+    name: hosting-platform-internal
+    external: true
+
+volumes:
+  # external : ce compose ne doit jamais pouvoir supprimer ce volume
+  # (pas de `docker compose down -v` accidentel sur les données réelles
+  # du Panel). Créé une seule fois, en dehors de ce fichier.
+  hosting-platform-postgres-data:
+    name: hosting-platform-postgres-data
+    external: true
